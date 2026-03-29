@@ -362,6 +362,8 @@ class PatrolController:
                     click_x, click_y = waypoints[0]
                 n_wp = len(waypoints)
                 self.info["direction"] = f"A*{mode}"
+                # A*成功 → 位置会变，清除旧的blocked
+                self.blocked_dirs.clear()
                 print(f"[PATROL] A*{mode} -> walk({click_x},{click_y}) ({n_wp}个拐点)")
             else:
                 # A* 失败 → 告诉Grid标墙，换方向重试
