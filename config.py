@@ -80,7 +80,7 @@ POTION_ORB_RADIUS = 51          # 血球半径
 # ============================================================
 PATROL_ENABLED = True
 PATROL_IDLE_TIMEOUT = 1.0       # 无怪多少秒后开始巡逻
-PATROL_MOVE_INTERVAL = 0.8      # 每次移动间隔（秒）
+PATROL_MOVE_INTERVAL = 0.6      # 每次移动间隔（秒）
 PATROL_CLICK_DISTANCE = 300     # 右键点击距离（像素）
 PATROL_STUCK_TIMEOUT = 1.5      # 画面不动多少秒判定撞墙
 PATROL_STUCK_THRESHOLD = 10.0   # 画面差异阈值（提高减少误判）

@@ -296,10 +296,10 @@ class PatrolController:
         self.info["direction"] = self.current_dir
         self.info["terrain"] = terrain
 
-    def _scan_visited_directions(self, radius=10):
+    def _scan_visited_directions(self, ray_length=30):
         """
-        扫描角色周围各方向的已走格子数。
-        以角色为圆心，半径 radius 格，8个方向各扫一个扇形。
+        射线扫描：每个方向沿直线查 ray_length 格，统计已走格子数。
+        射线扫描比圆形扫描更远、更快、更准。
 
         Returns:
             dict {方向名: 已走格子数} 或 None（OCR未就绪）
@@ -308,30 +308,16 @@ class PatrolController:
             return None
 
         gx, gy = self.grid_nav.world_x, self.grid_nav.world_y
-        visit_count = {d: 0 for d in DIR_NAMES}
+        visit_count = {}
 
-        # 扫描圆形区域内的每个格子
-        for dx_i in range(-radius, radius + 1):
-            for dy_i in range(-radius, radius + 1):
-                if dx_i == 0 and dy_i == 0:
-                    continue
-                # 圆形范围检查
-                if dx_i * dx_i + dy_i * dy_i > radius * radius:
-                    continue
-
-                cx, cy = gx + dx_i, gy + dy_i
-                if not self.grid_nav.grid.is_visited(cx, cy):
-                    continue
-
-                # 判断这个格子属于哪个方向（归一化为8方向）
-                ndx = 1 if dx_i > 0 else (-1 if dx_i < 0 else 0)
-                ndy = 1 if dy_i > 0 else (-1 if dy_i < 0 else 0)
-
-                # 找匹配的方向名
-                for d_name, (ddx, ddy) in DIRECTIONS.items():
-                    if ddx == ndx and ddy == ndy:
-                        visit_count[d_name] += 1
-                        break
+        for d_name, (dx, dy) in DIRECTIONS.items():
+            count = 0
+            for step in range(1, ray_length + 1):
+                cx = gx + dx * step
+                cy = gy + dy * step
+                if self.grid_nav.grid.is_visited(cx, cy):
+                    count += 1
+            visit_count[d_name] = count
 
         return visit_count
 
