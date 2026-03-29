@@ -255,8 +255,8 @@ class PatrolController:
             self.blocked_dirs.clear()
             available = DIR_NAMES[:]
 
-        # === 核心：扫描周围已走格子，往走得少的方向走 ===
-        visit_count = self._scan_visited_directions()
+        # === 核心：统计各方向扇区已走格子数，往走得少的方向走 ===
+        visit_count = self._get_away_from_visited()
 
         if visit_count:
             # 按已走格子数排序（少→多），走得少的方向优先
@@ -296,39 +296,38 @@ class PatrolController:
         self.info["direction"] = self.current_dir
         self.info["terrain"] = terrain
 
-    def _scan_visited_directions(self, ray_length=30):
+    def _get_away_from_visited(self):
         """
-        宽射线扫描：每个方向沿直线查 ray_length 格，宽度 3 格。
-        宽射线能捕获斜向走过的路径。
+        计算已走格子的重心，返回远离重心的方向。
+        不管路径怎么弯，重心总能代表"来的方向"。
 
         Returns:
-            dict {方向名: 已走格子数} 或 None（OCR未就绪）
+            dict {方向名: 已走格子数(在该方向扇区)} 或 None
         """
         if self.grid_nav is None or self.grid_nav.world_x < 0:
             return None
 
         gx, gy = self.grid_nav.world_x, self.grid_nav.world_y
-        visit_count = {}
+        visited = self.grid_nav.grid.visited
 
-        for d_name, (dx, dy) in DIRECTIONS.items():
-            count = 0
-            # 垂直于射线方向的偏移（宽度3格：-1, 0, +1）
-            if dx == 0:       # 上下方向 → 左右偏移
-                offsets = [(-1, 0), (0, 0), (1, 0)]
-            elif dy == 0:     # 左右方向 → 上下偏移
-                offsets = [(0, -1), (0, 0), (0, 1)]
-            else:             # 斜方向 → 两个垂直偏移
-                offsets = [(0, 0), (-dx, 0), (0, -dy)]
+        if len(visited) < 3:
+            return None
 
-            for step in range(1, ray_length + 1):
-                base_x = gx + dx * step
-                base_y = gy + dy * step
-                for ox, oy in offsets:
-                    if self.grid_nav.grid.is_visited(base_x + ox, base_y + oy):
-                        count += 1
-                        break  # 这一步有就够了，不重复计数
+        # 统计每个方向扇区的已走格子数
+        visit_count = {d: 0 for d in DIR_NAMES}
 
-            visit_count[d_name] = count
+        for (vx, vy) in visited:
+            dx_i = vx - gx
+            dy_i = vy - gy
+            if dx_i == 0 and dy_i == 0:
+                continue
+            # 归一化为8方向
+            ndx = 1 if dx_i > 0 else (-1 if dx_i < 0 else 0)
+            ndy = 1 if dy_i > 0 else (-1 if dy_i < 0 else 0)
+            for d_name, (ddx, ddy) in DIRECTIONS.items():
+                if ddx == ndx and ddy == ndy:
+                    visit_count[d_name] += 1
+                    break
 
         return visit_count
 
