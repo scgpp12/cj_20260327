@@ -44,7 +44,7 @@ class RedBallDetector:
 
         # UI 排除区域（比例）
         self.exclude_left = 0.15
-        self.exclude_bottom = 0.20
+        self.exclude_bottom = 0.10           # 缩小：只排底部UI栏，不挡怪物
         self.exclude_right_top = (0.85, 0.20)  # (x比例, y比例)
 
     def detect(self, frame):
@@ -81,8 +81,7 @@ class RedBallDetector:
         rt_y = int(h * self.exclude_right_top[1])
         mask[:rt_y, rt_x:] = 0                         # 右上小地图
 
-        # 排除角色自身区域（血球等红色 UI）
-        cv2.circle(mask, (self.self_cx, self.self_cy), self.self_radius, 0, -1)
+        # 角色中心死区已取消（不再排除，避免漏检身边的怪）
 
         # 形态学处理：闭运算连接碎片 + 开运算去噪
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))

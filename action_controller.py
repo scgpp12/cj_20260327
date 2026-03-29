@@ -1,15 +1,16 @@
 """
-action_controller.py - 攻击控制器 (v3 重构)
+action_controller.py - 攻击控制器 (v4 简化)
 
 状态机：
   IDLE    - 无目标，等待发现怪物
   BURST   - 快速连击锁敌（2下，间隔0.1s）
-  WAITING - 等待自动攻击，持续跟踪目标
+  WAITING - 等待，持续跟踪目标，每秒补点
 
 核心规则：
-  - targets 为空 → 立即回 IDLE（不再等1秒确认）
-  - 近距离(≤60px) → 锁死目标不跳，每1秒补点
-  - 远距离(>60px) → 追踪位置变化，位移≥15px重新点击
+  - targets 为空超过0.5s → 回 IDLE
+  - 锁定远怪时身边出现近怪(≤60px) → 立刻切换
+  - 近距离(≤60px)用方位点攻击，远距离直接点怪物
+  - 声波判断已废除，WAITING 固定2秒后重新连击
 """
 
 import time
@@ -102,15 +103,15 @@ class ActionController:
 
         # 等待参数
         self._wait_start_time = 0
-        self.WAIT_RECHECK_INTERVAL = 2.0  # 多久无声音重新连击
+        self.WAIT_RECHECK_INTERVAL = 2.0  # 固定2秒后重新连击
         self.WAIT_ABSOLUTE_MAX = 10.0     # 绝对超时
 
         # 目标消失确认：短暂丢失不立刻放弃，但也不点击
         self._target_gone_time = 0
         self.TARGET_GONE_CONFIRM = 0.5    # 消失0.5秒才确认死亡
 
-        # 声音状态（由外部设置）
-        self.is_attacking_audio = False
+        # 近怪切换阈值
+        self.CLOSE_RANGE = 60             # ≤60px 视为身边有怪
 
         # 巡逻控制器引用（攻击前释放右键）
         self._patrol_ref = None
@@ -171,7 +172,7 @@ class ActionController:
         self.game_hwnd = hwnd
 
     def set_audio_state(self, is_attacking):
-        self.is_attacking_audio = is_attacking
+        pass  # 声波判断已废除，保留接口兼容
 
     def set_visual_state(self, is_moving):
         pass  # 保留接口兼容，不再使用
@@ -224,6 +225,8 @@ class ActionController:
             print(f"[ATK] 发现目标 dist={dist:.0f} → 连击锁敌")
 
         elif self.state == self.STATE_BURST:
+            # 检查是否有更近的怪需要切换
+            self._check_switch_closer(targets)
             # 更新目标位置
             self._update_locked_target(targets)
 
@@ -239,6 +242,8 @@ class ActionController:
                 self.lock_count += 1
 
         elif self.state == self.STATE_WAITING:
+            # 检查是否有更近的怪需要切换
+            self._check_switch_closer(targets)
             # 更新目标位置
             self._update_locked_target(targets)
 
@@ -254,11 +259,9 @@ class ActionController:
             # 持续点击：近距离每1秒补点，远距离位置变化时点
             self._keep_clicking(targets, now)
 
-            # 有声音 → 继续等
-            if self.is_attacking_audio and wait_elapsed < 5.0:
-                pass
-            elif wait_elapsed >= self.WAIT_RECHECK_INTERVAL:
-                print(f"[ATK] {wait_elapsed:.0f}秒无声音 → 重新连击")
+            # 固定2秒后重新连击（声波判断已废除）
+            if wait_elapsed >= self.WAIT_RECHECK_INTERVAL:
+                print(f"[ATK] {wait_elapsed:.0f}秒等待 → 重新连击")
                 self._burst_done = 0
                 self.state = self.STATE_BURST
 
@@ -266,8 +269,26 @@ class ActionController:
 
     # ===== 内部方法 =====
 
+    def _check_switch_closer(self, targets):
+        """锁定远怪时，出现明显更近的怪 → 立刻切换
+        条件：锁定怪 > 100px，且最近怪 < 锁定距离的一半
+        """
+        if not targets or self.locked_target is None:
+            return
+        locked_dist = self._dist_to_self(self.locked_target)
+        nearest = targets[0]
+        nearest_dist = self._dist_to_self(nearest)
+
+        # 锁定的怪距离 > 100，且最近怪 < 锁定距离的一半 → 切换
+        if locked_dist > 100 and nearest_dist < locked_dist * 0.5:
+            print(f"[ATK] 出现更近的怪 {locked_dist:.0f}→{nearest_dist:.0f}px → 切换目标")
+            self.locked_target = nearest
+            self._prev_target_pos = None
+            self._burst_done = 0
+            self.state = self.STATE_BURST
+
     def _update_locked_target(self, targets):
-        """更新锁定目标位置：始终跟踪同一只怪的新位置，不切换到别的怪"""
+        """更新锁定目标位置：跟踪同一只怪的新位置，找不到则切最近的"""
         if not targets or self.locked_target is None:
             return
 
@@ -276,11 +297,12 @@ class ActionController:
         if same is not None:
             self.locked_target = same
         else:
-            # 远距离找不到同一只 → 锁定最近的
-            locked_dist = self._dist_to_self(self.locked_target)
-            if locked_dist > 60:
-                self.locked_target = targets[0]
-                self._prev_target_pos = None
+            # 找不到同一只怪（移动太远或消失）→ 无条件切换到最近的
+            old_dist = self._dist_to_self(self.locked_target)
+            self.locked_target = targets[0]
+            self._prev_target_pos = None
+            new_dist = self._dist_to_self(self.locked_target)
+            print(f"[ATK] 目标丢失，切换到最近怪 {old_dist:.0f}→{new_dist:.0f}px")
 
     def _keep_clicking(self, targets, now):
         """WAITING 期间持续点击"""
@@ -359,7 +381,6 @@ class ActionController:
             "locked": self.locked_target is not None,
             "target": self.locked_target,
             "count": self.lock_count,
-            "audio": self.is_attacking_audio,
             "moving": False,
         }
 
