@@ -248,7 +248,7 @@ class PatrolController:
         if self.grid_nav is not None:
             terrain = self._scan_terrain(frame)
             direction = self.grid_nav.get_direction(frame, terrain)
-            if direction is not None:
+            if direction is not None and direction not in self.blocked_dirs:
                 self.current_dir = direction
                 self.dir_visit_count[self.current_dir] = \
                     self.dir_visit_count.get(self.current_dir, 0) + 1

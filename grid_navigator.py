@@ -98,20 +98,13 @@ class CoveragePlanner:
         self._scan_right = True  # True=从左到右, False=从右到左
         self._scan_x = 0        # 当前扫描列
 
-    def find_next_target(self, cur_x, cur_y, max_search=3000):
+    def find_next_target(self, cur_x, cur_y, max_search=5000):
         """
-        找下一个要走的未访问坐标。
-        优先蛇形扫描，失败则 BFS 找最近未访问格。
+        BFS 找最近的可达未访问坐标（绕墙）。
 
         Returns:
             (x, y) 或 None
         """
-        # 策略1：蛇形扫描 — 找当前行最近的未访问格
-        target = self._snake_scan(cur_x, cur_y)
-        if target:
-            return target
-
-        # 策略2：BFS 找最近未访问格
         return self._bfs_frontier(cur_x, cur_y, max_search)
 
     def _snake_scan(self, cur_x, cur_y):
