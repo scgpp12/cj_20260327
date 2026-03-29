@@ -298,8 +298,8 @@ class PatrolController:
 
     def _scan_visited_directions(self, ray_length=30):
         """
-        射线扫描：每个方向沿直线查 ray_length 格，统计已走格子数。
-        射线扫描比圆形扫描更远、更快、更准。
+        宽射线扫描：每个方向沿直线查 ray_length 格，宽度 3 格。
+        宽射线能捕获斜向走过的路径。
 
         Returns:
             dict {方向名: 已走格子数} 或 None（OCR未就绪）
@@ -312,11 +312,22 @@ class PatrolController:
 
         for d_name, (dx, dy) in DIRECTIONS.items():
             count = 0
+            # 垂直于射线方向的偏移（宽度3格：-1, 0, +1）
+            if dx == 0:       # 上下方向 → 左右偏移
+                offsets = [(-1, 0), (0, 0), (1, 0)]
+            elif dy == 0:     # 左右方向 → 上下偏移
+                offsets = [(0, -1), (0, 0), (0, 1)]
+            else:             # 斜方向 → 两个垂直偏移
+                offsets = [(0, 0), (-dx, 0), (0, -dy)]
+
             for step in range(1, ray_length + 1):
-                cx = gx + dx * step
-                cy = gy + dy * step
-                if self.grid_nav.grid.is_visited(cx, cy):
-                    count += 1
+                base_x = gx + dx * step
+                base_y = gy + dy * step
+                for ox, oy in offsets:
+                    if self.grid_nav.grid.is_visited(base_x + ox, base_y + oy):
+                        count += 1
+                        break  # 这一步有就够了，不重复计数
+
             visit_count[d_name] = count
 
         return visit_count
