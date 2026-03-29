@@ -125,6 +125,22 @@ def _dist_to_self(box):
 
 
 def main():
+    # 同时输出到控制台和日志文件
+    import sys, io
+    class TeeWriter:
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, data):
+            for s in self.streams:
+                try: s.write(data); s.flush()
+                except: pass
+        def flush(self):
+            for s in self.streams:
+                try: s.flush()
+                except: pass
+    log_file = open("output/main_log.txt", "w", encoding="utf-8")
+    sys.stdout = TeeWriter(sys.__stdout__, log_file)
+
     print("=" * 60)
     print("  Game Detector ver05 (YOLO + CV)")
     print("=" * 60)
