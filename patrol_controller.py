@@ -247,20 +247,28 @@ class PatrolController:
         # ---- 网格覆盖模式 ----
         if self.grid_nav is not None:
             terrain = self._scan_terrain(frame)
-            direction = self.grid_nav.get_direction(frame, terrain)
-            if direction is not None and direction not in self.blocked_dirs:
-                self.current_dir = direction
-                self.dir_visit_count[self.current_dir] = \
-                    self.dir_visit_count.get(self.current_dir, 0) + 1
-                self.dir_history.append(self.current_dir)
-                if len(self.dir_history) > self.DIR_HISTORY_MAX:
-                    self.dir_history.pop(0)
-                self.info["direction"] = self.current_dir
-                cov = self.grid_nav.grid.coverage_ratio()
-                print(f"[GRID] → {self.current_dir} (覆盖率: {cov:.1%})")
-                return
-            else:
-                print("[GRID] 区域已全部覆盖，切回随机巡逻")
+
+            # 最多尝试3次获取不同方向
+            for _retry in range(3):
+                direction = self.grid_nav.get_direction(frame, terrain)
+                if direction is None:
+                    print("[GRID] 区域已全部覆盖，切回随机巡逻")
+                    break
+                if direction not in self.blocked_dirs:
+                    self.current_dir = direction
+                    self.dir_visit_count[self.current_dir] = \
+                        self.dir_visit_count.get(self.current_dir, 0) + 1
+                    self.dir_history.append(self.current_dir)
+                    if len(self.dir_history) > self.DIR_HISTORY_MAX:
+                        self.dir_history.pop(0)
+                    self.info["direction"] = self.current_dir
+                    cov = self.grid_nav.grid.coverage_ratio()
+                    print(f"[GRID] → {self.current_dir} (覆盖率: {cov:.1%})")
+                    return
+                else:
+                    # 方向被blocked → 告诉grid标墙，重新找航点
+                    self.grid_nav.on_direction_failed(direction)
+                    print(f"[GRID] {direction} 在blocked中，重新规划")
 
         # ---- 原始地形亮度评分 ----
         """
