@@ -47,12 +47,9 @@ class GridMap:
         self.walls = set()       # 墙壁坐标 {(x, y)}
 
     def mark_visited(self, x, y):
-        """标记坐标及周围9格(3×3)为已走过"""
-        for dx in range(-1, 2):
-            for dy in range(-1, 2):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx <= self.MAP_SIZE and 0 <= ny <= self.MAP_SIZE:
-                    self.visited.add((nx, ny))
+        """标记坐标为已走过"""
+        if 0 <= x <= self.MAP_SIZE and 0 <= y <= self.MAP_SIZE:
+            self.visited.add((x, y))
 
     def mark_wall(self, x, y):
         """标记坐标为墙壁"""
@@ -244,8 +241,8 @@ class GridNavigator:
             return
 
         dx, dy = DIRECTIONS[direction]
-        # 标记前方 3-8 格为墙（A*看到的障碍通常比撞墙远）
-        for i in range(3, 9):
+        # 标记前方 2-4 格为墙
+        for i in range(2, 5):
             wx = self.world_x + dx * i
             wy = self.world_y + dy * i
             self.grid.mark_wall(wx, wy)
