@@ -95,14 +95,17 @@ class CoveragePlanner:
         self._scan_right = True  # True=从左到右, False=从右到左
         self._scan_x = 0        # 当前扫描列
 
-    def find_next_target(self, cur_x, cur_y, max_search=5000):
+    def find_next_target(self, cur_x, cur_y, max_search=5000, blocked_dirs=None):
         """
-        BFS 找最近的可达未访问坐标（绕墙）。
+        BFS 找最近的可达未访问坐标（绕墙，跳过blocked方向）。
+
+        Args:
+            blocked_dirs: set of direction names to skip (e.g. {"UP_LEFT", "RIGHT"})
 
         Returns:
             (x, y) 或 None
         """
-        return self._bfs_frontier(cur_x, cur_y, max_search)
+        return self._bfs_frontier(cur_x, cur_y, max_search, blocked_dirs)
 
     def _snake_scan(self, cur_x, cur_y):
         """蛇形行扫描：找当前或附近行的未访问格"""
@@ -130,8 +133,15 @@ class CoveragePlanner:
 
         return None
 
-    def _bfs_frontier(self, cur_x, cur_y, max_search):
-        """BFS 找最近的未访问可走格"""
+    def _bfs_frontier(self, cur_x, cur_y, max_search, blocked_dirs=None):
+        """BFS 找最近的未访问可走格（跳过blocked方向）"""
+        # 预计算 blocked 方向的 (dx, dy) 集合
+        blocked_vectors = set()
+        if blocked_dirs:
+            for d_name in blocked_dirs:
+                if d_name in DIRECTIONS:
+                    blocked_vectors.add(DIRECTIONS[d_name])
+
         start = (cur_x, cur_y)
         queue = deque([start])
         visited_bfs = {start}
@@ -153,6 +163,15 @@ class CoveragePlanner:
                     continue
 
                 if not self.grid.is_visited(nx, ny):
+                    # 检查目标方向是否被blocked
+                    if blocked_vectors:
+                        tdx = nx - cur_x
+                        tdy = ny - cur_y
+                        # 归一化为方向
+                        if tdx != 0: tdx = 1 if tdx > 0 else -1
+                        if tdy != 0: tdy = 1 if tdy > 0 else -1
+                        if (tdx, tdy) in blocked_vectors:
+                            continue  # 跳过blocked方向的目标
                     return (nx, ny)  # 找到未访问格
 
                 queue.append((nx, ny))
@@ -207,18 +226,18 @@ class GridNavigator:
             if self.coord_reader._fail_count == 1:
                 print(f"[OCR] 读取失败, 上次坐标:({self.world_x},{self.world_y})")
 
-    def get_direction(self, frame, terrain_scores=None):
+    def get_direction(self, frame, terrain_scores=None, blocked_dirs=None):
         """
         获取下一步方向。
+
+        Args:
+            blocked_dirs: set of blocked direction names to avoid
 
         Returns:
             方向名（如 "UP_LEFT"）或 None（全覆盖完）
         """
         if self.world_x < 0:
             return None  # OCR 还没读到坐标
-
-        # 地形标墙已禁用（太激进，会把BFS围死）
-        # 只依赖 A*失败 和 撞墙检测 来标墙
 
         # 检查是否到达航点
         if self._waypoint is not None:
@@ -229,7 +248,8 @@ class GridNavigator:
 
         # 需要新航点
         if self._waypoint is None:
-            target = self.planner.find_next_target(self.world_x, self.world_y)
+            target = self.planner.find_next_target(
+                self.world_x, self.world_y, blocked_dirs=blocked_dirs)
             if target is None:
                 print(f"[GRID] BFS找不到目标! pos=({self.world_x},{self.world_y}) "
                       f"visited={len(self.grid.visited)} walls={len(self.grid.walls)}")
