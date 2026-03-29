@@ -47,9 +47,12 @@ class GridMap:
         self.walls = set()       # 墙壁坐标 {(x, y)}
 
     def mark_visited(self, x, y):
-        """标记坐标为已走过"""
-        if 0 <= x <= self.MAP_SIZE and 0 <= y <= self.MAP_SIZE:
-            self.visited.add((x, y))
+        """标记坐标及周围9格(3×3)为已走过"""
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx <= self.MAP_SIZE and 0 <= ny <= self.MAP_SIZE:
+                    self.visited.add((nx, ny))
 
     def mark_wall(self, x, y):
         """标记坐标为墙壁"""
