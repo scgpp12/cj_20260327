@@ -217,6 +217,16 @@ class GridNavigator:
             old_x, old_y = self.world_x, self.world_y
             self.world_x, self.world_y = coord
             self.grid.mark_visited(self.world_x, self.world_y)
+            # 标记从旧坐标到新坐标的中间格子（防止超步漏标）
+            if old_x >= 0:
+                dx = self.world_x - old_x
+                dy = self.world_y - old_y
+                steps = max(abs(dx), abs(dy))
+                if 0 < steps <= 5:
+                    for s in range(1, steps):
+                        ix = old_x + round(dx * s / steps)
+                        iy = old_y + round(dy * s / steps)
+                        self.grid.mark_visited(ix, iy)
             # 每10次成功读取打印一次
             if self.coord_reader._total_success % 10 == 1:
                 stats = self.grid.get_stats()
@@ -243,6 +253,12 @@ class GridNavigator:
         if self._waypoint is not None:
             dist = abs(self.world_x - self._waypoint[0]) + abs(self.world_y - self._waypoint[1])
             if dist <= 2:  # 曼哈顿距离 ≤ 2 视为到达
+                # 标记航点及周围为已走（防止角色超过航点但OCR没记录到）
+                wx, wy = self._waypoint
+                self.grid.mark_visited(wx, wy)
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
+                        self.grid.mark_visited(wx + dx, wy + dy)
                 self._waypoint = None
                 self.total_steps += 1
 
