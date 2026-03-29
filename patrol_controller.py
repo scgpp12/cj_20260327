@@ -93,12 +93,10 @@ class PatrolController:
         self.blocked_dirs = set()            # 被阻挡的方向
         self.consecutive_stuck = 0           # 连续撞墙次数
 
-        # 右键长按状态
-        self._rbutton_held = False           # 当前是否按住右键
-        self._held_hwnd = None               # 按住右键的窗口句柄
-        self._held_lparam = 0                # 按住时的坐标参数
-        self._last_hold_time = 0             # 上次发送长按消息的时间
-        self.HOLD_RESEND_INTERVAL = 0.15     # 每 150ms 重发一次右键保持长按
+        # 右键点按状态（点一下走一步，约80px/1秒）
+        self._rbutton_held = False           # 兼容：攻击时释放用
+        self._held_hwnd = None               # 上次点击的窗口句柄
+        self._held_lparam = 0                # 兼容保留
 
         # ---- 路径记忆 ----
         self.dir_visit_count = {d: 0 for d in DIR_NAMES}
@@ -167,19 +165,9 @@ class PatrolController:
             self._monster_stuck_count = 0  # 没有怪物时重置撞墙计数
 
     def _release_rbutton(self):
-        """释放右键（原子操作：先改状态再发消息）"""
-        if self._rbutton_held:
-            hwnd = self._held_hwnd
-            # 先标记为已释放（防止其他地方并发操作）
-            self._rbutton_held = False
-            self._held_hwnd = None
-            self._held_lparam = 0
-            # 再发消息
-            if hwnd:
-                try:
-                    PostMessage(hwnd, WM_RBUTTONUP, 0, _make_lparam(SELF_CX, SELF_CY))
-                except Exception:
-                    pass
+        """停止移动（点按模式下主要是标记状态，兼容攻击器调用）"""
+        self._rbutton_held = False
+        self._held_lparam = 0
 
     def on_target_found(self):
         """外部调用：发现怪物了 → 停止跑步，进入战斗"""
@@ -235,14 +223,8 @@ class PatrolController:
                 return
 
             if now - self.last_move_time >= PATROL_MOVE_INTERVAL:
+                self._pick_direction(frame)  # 每步重新选方向（OCR坐标更新后避开已走区域）
                 self._do_move(frame, game_hwnd)
-
-            elif self._rbutton_held and now - self._last_hold_time >= self.HOLD_RESEND_INTERVAL:
-                try:
-                    PostMessage(game_hwnd, WM_RBUTTONDOWN, MK_RBUTTON, self._held_lparam)
-                    self._last_hold_time = now
-                except Exception:
-                    pass
 
         elif self.state == "COMBAT":
             pass
@@ -342,6 +324,22 @@ class PatrolController:
                         bonus = 0.3 * (1.0 - diff / 45.0)  # 越对准加分越多
                         monster_bonus[d] = max(monster_bonus[d], bonus)
 
+        # OCR 坐标防回头：检查每个方向走5步的已访问比例
+        ocr_visited_penalty = {}
+        for d in DIR_NAMES:
+            ocr_visited_penalty[d] = 0.0
+        if self.grid_nav is not None and self.grid_nav.world_x >= 0:
+            gx, gy = self.grid_nav.world_x, self.grid_nav.world_y
+            for d in DIR_NAMES:
+                dx, dy = DIRECTIONS[d]
+                visited_count = 0
+                for step in range(1, 6):
+                    cx = gx + dx * step
+                    cy = gy + dy * step
+                    if self.grid_nav.grid.is_visited(cx, cy):
+                        visited_count += 1
+                ocr_visited_penalty[d] = visited_count / 5.0  # 0~1
+
         # 综合评分
         max_visits = max(self.dir_visit_count.values()) or 1
         scored = []
@@ -350,6 +348,7 @@ class PatrolController:
             freshness = 1.0 - (self.dir_visit_count[d] / (max_visits + 1))
             penalty = min(backtrack_penalty[d], 0.8)
             m_bonus = monster_bonus.get(d, 0.0)
+            ocr_penalty = ocr_visited_penalty.get(d, 0.0)
 
             # 有怪物提示时：怪物方向权重 30%
             if self._monster_hints:
@@ -357,6 +356,9 @@ class PatrolController:
                          (1.0 - penalty) * 0.2 + m_bonus)
             else:
                 total = brightness_score * 0.5 + freshness * 0.3 + (1.0 - penalty) * 0.2
+
+            # OCR 防回头：已走过的方向大幅降分
+            total *= (1.0 - ocr_penalty * 0.7)
 
             scored.append((d, total, terrain[d]))
 
@@ -383,11 +385,9 @@ class PatrolController:
         self.info["terrain"] = terrain
 
     def _do_move(self, frame, game_hwnd):
-        """发送移动指令（右键长按跑步）— 所有场景都优先用 A*"""
+        """发送移动指令（右键点按走路，一步约80px/1秒）— 优先用 A* 规划"""
 
         # 确定目标点
-        # monster_hints 只影响 _pick_direction 的评分，不直接控制目标点
-        # 这样方向选择已经偏向怪物方向了，A* 会沿走廊规划路线
         if self._chase_target is not None:
             target_x, target_y = self._chase_target
             mode = "CHASE"
@@ -401,36 +401,36 @@ class PatrolController:
         if self.pathfinder is not None:
             waypoints = self.pathfinder.find_path(frame, target_x, target_y)
             if waypoints and len(waypoints) > 0:
-                # 跳过太近的拐点（< 50px），直接走远一点的
-                while len(waypoints) > 1:
-                    wx, wy = waypoints[0]
-                    dist = ((wx - SELF_CX) ** 2 + (wy - SELF_CY) ** 2) ** 0.5
-                    if dist < 50:
-                        waypoints.pop(0)
-                    else:
-                        break
+                # 过滤所有拐点：离角色中心 < 200px 的全部跳过
+                waypoints = [(wx, wy) for wx, wy in waypoints
+                             if ((wx - SELF_CX) ** 2 + (wy - SELF_CY) ** 2) ** 0.5 >= 200]
 
-                click_x, click_y = waypoints[0]
+                if not waypoints:
+                    # 所有拐点都太近 → 直接用方向目标点
+                    click_x, click_y = target_x, target_y
+                    self.info["direction"] = mode
+                    print(f"[PATROL] A*拐点都太近 → 直线走({click_x},{click_y})")
+                else:
+                    click_x, click_y = waypoints[0]
                 n_wp = len(waypoints)
                 self.info["direction"] = f"A*{mode}"
-                print(f"[PATROL] A*{mode} -> run({click_x},{click_y}) ({n_wp}个拐点)")
+                print(f"[PATROL] A*{mode} -> walk({click_x},{click_y}) ({n_wp}个拐点)")
             else:
-                # A* 失败 → 目标不可达，换方向重试
-                print(f"[PATROL] A*{mode} 失败(目标不可达)，换方向")
+                # A* 失败 → 换方向重试
+                print(f"[PATROL] A*{mode} 失败，换方向")
                 self.blocked_dirs.add(self.current_dir)
                 self._pick_direction(frame)
                 dx, dy = DIRECTIONS[self.current_dir]
                 target_x = SELF_CX + int(dx * PATROL_CLICK_DISTANCE)
                 target_y = SELF_CY + int(dy * PATROL_CLICK_DISTANCE)
 
-                # 用新方向再试一次 A*
                 waypoints = self.pathfinder.find_path(frame, target_x, target_y)
                 if waypoints and len(waypoints) > 0:
                     click_x, click_y = waypoints[0]
                     self.info["direction"] = f"A*{mode}"
-                    print(f"[PATROL] A*重试 -> run({click_x},{click_y})")
+                    print(f"[PATROL] A*重试 -> walk({click_x},{click_y})")
                 else:
-                    # 还是失败 → 用地形扫描找最亮方向直线走
+                    # 还是失败 → 最亮方向直线走
                     terrain = self._scan_terrain(frame)
                     best_dir = max(terrain, key=terrain.get)
                     dx, dy = DIRECTIONS[best_dir]
@@ -438,11 +438,10 @@ class PatrolController:
                     click_y = SELF_CY + int(dy * PATROL_CLICK_DISTANCE)
                     self.current_dir = best_dir
                     self.info["direction"] = f"FALLBACK({best_dir})"
-                    print(f"[PATROL] FALLBACK({best_dir}) -> run({click_x},{click_y})")
+                    print(f"[PATROL] FALLBACK({best_dir}) -> walk({click_x},{click_y})")
         else:
             click_x, click_y = target_x, target_y
             self.info["direction"] = mode
-            print(f"[PATROL] {mode} -> run({click_x},{click_y})")
 
         # 确保点击坐标在画面内
         h, w = frame.shape[:2]
@@ -452,19 +451,12 @@ class PatrolController:
         try:
             lparam = _make_lparam(click_x, click_y)
 
-            # 先松开之前的右键（如果还按着）
-            if self._rbutton_held:
-                PostMessage(game_hwnd, WM_RBUTTONUP, 0, lparam)
-                time.sleep(0.05)
-
-            # 按下右键并保持（长按 = 跑步）
+            # 右键点按（按下+松开 = 走一步）
             PostMessage(game_hwnd, WM_RBUTTONDOWN, MK_RBUTTON, lparam)
-            self._rbutton_held = True
+            PostMessage(game_hwnd, WM_RBUTTONUP, 0, lparam)
             self._held_hwnd = game_hwnd
-            self._held_lparam = lparam
-            self._last_hold_time = time.time()
         except Exception as e:
-            print(f"[PATROL] 跑步指令失败: {e}")
+            print(f"[PATROL] 移动指令失败: {e}")
             return
 
         # 记录移动帧（用于撞墙检测）
@@ -473,7 +465,7 @@ class PatrolController:
         self.last_move_time = time.time()
         self.info["click_pos"] = (click_x, click_y)
 
-        print(f"[PATROL] RUN {self.current_dir} -> hold({click_x},{click_y})")
+        print(f"[PATROL] WALK {self.current_dir} -> click({click_x},{click_y})")
 
     def _check_stuck(self, frame):
         """检查是否撞墙（画面静止检测）"""
@@ -546,10 +538,16 @@ class PatrolController:
         stuck_dir = self.current_dir
 
         # 0. 朝移动方向盲点 3 下左键（打掉可能挡路的隐形怪）
+        # 距离参考攻击模式：直方向40px，斜方向50px
         if self._held_hwnd is not None:
             dx, dy = DIRECTIONS.get(stuck_dir, (0, 0))
-            click_x = SELF_CX + int(dx * 100)  # 前方 100px 处
-            click_y = SELF_CY + int(dy * 100)
+            is_diagonal = abs(dx) == 1 and abs(dy) == 1
+            blind_dist = 50 if is_diagonal else 40
+            # 攻击圆心在角色上方50px
+            origin_x = SELF_CX - 5
+            origin_y = SELF_CY - 50 + 10
+            click_x = origin_x + int(dx * blind_dist)
+            click_y = origin_y + int(dy * blind_dist)
             try:
                 lparam = _make_lparam(click_x, click_y)
                 for _ in range(3):
@@ -559,11 +557,9 @@ class PatrolController:
             except Exception as e:
                 print(f"[PATROL] 盲点失败: {e}")
 
-        # 1. 清除 A* 缓存路径，下次 _do_move 会用最新画面重新规划
-        #    不手动标墙（find_path 会重建网格，手动标的会被覆盖或阻塞正确路径）
+        # 1. 清除 A* 缓存路径
         if self.pathfinder is not None:
             self.pathfinder._last_waypoints = None
-            print(f"[PATROL] 撞墙! {stuck_dir} → A* 将用最新画面重新规划")
 
         # 2. 通知网格导航（如果启用）
         if self.grid_nav is not None:
@@ -577,7 +573,7 @@ class PatrolController:
                 self._monster_hints = []
                 self._monster_stuck_count = 0
 
-        # 4. 换方向（A* 失败时的 fallback）
+        # 4. 换方向
         self.blocked_dirs.add(stuck_dir)
         if self.consecutive_stuck >= 3:
             self.blocked_dirs.clear()

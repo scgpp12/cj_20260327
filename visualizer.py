@@ -255,8 +255,9 @@ def draw_patrol_info(frame, patrol_info):
 
     if click_pos is not None and state in ("PATROL", "STUCK"):
         cx, cy = click_pos
-        cv2.arrowedLine(frame, (SELF_CENTER_X, SELF_CENTER_Y), (cx, cy), color, 3, tipLength=0.25)
-        cv2.circle(frame, (cx, cy), 10, color, 2)
+        purple = (180, 0, 255)  # 紫色
+        cv2.arrowedLine(frame, (SELF_CENTER_X, SELF_CENTER_Y), (cx, cy), purple, 2, tipLength=0.25)
+        cv2.circle(frame, (cx, cy), 8, purple, -1)  # 实心紫色圆点
 
 
 def draw_fps(frame, fps):
@@ -275,101 +276,70 @@ def _put_label(frame, text, x, y, color, scale=None):
     cv2.putText(frame, text, (x, y), FONT, scale, color, 1, cv2.LINE_AA)
 
 
-def draw_grid_overlay(frame, grid_data, size=200):
+def draw_grid_overlay(frame, grid_data, size=150):
     """
-    右下角画小地图，显示网格覆盖情况。
+    左下角画小地图（300×300 → 150×150），显示覆盖情况。
     grid_data 来自 GridNavigator.get_viz_data()
     """
     if grid_data is None:
         return
 
-    cells = grid_data.get("cells", {})
-    cell_size = grid_data.get("cell_size", 64)
+    visited = grid_data.get("visited", set())
+    walls = grid_data.get("walls", set())
+    map_size = grid_data.get("map_size", 300)
     world_pos = grid_data.get("world_pos", (0, 0))
     waypoint = grid_data.get("waypoint")
     coverage = grid_data.get("coverage", 0)
+    ocr_rate = grid_data.get("ocr_rate", 0)
 
-    if not cells:
-        return
+    # 创建小地图（300→150，每2格1像素）
+    scale = size / map_size  # 0.5
+    minimap = np.zeros((size, size, 3), dtype=np.uint8)
+    minimap[:] = (30, 30, 30)  # 深灰底色 = 未探索
 
-    # 计算边界
-    xs = [k[0] for k in cells]
-    ys = [k[1] for k in cells]
-    min_gx, max_gx = min(xs), max(xs)
-    min_gy, max_gy = min(ys), max(ys)
+    # 画已走过的格子（绿色）
+    for (x, y) in visited:
+        px = int(x * scale)
+        py = int(y * scale)
+        if 0 <= px < size and 0 <= py < size:
+            minimap[py, px] = (0, 180, 0)
 
-    grid_w = max_gx - min_gx + 1
-    grid_h = max_gy - min_gy + 1
+    # 画墙壁（红色）
+    for (x, y) in walls:
+        px = int(x * scale)
+        py = int(y * scale)
+        if 0 <= px < size and 0 <= py < size:
+            minimap[py, px] = (0, 0, 150)
 
-    if grid_w <= 0 or grid_h <= 0:
-        return
+    # 画角色位置（白色大点）
+    cx = int(world_pos[0] * scale)
+    cy = int(world_pos[1] * scale)
+    if 0 <= cx < size and 0 <= cy < size:
+        cv2.circle(minimap, (cx, cy), 3, (255, 255, 255), -1)
 
-    # 计算缩放，使小地图适配 size x size
-    pixel_scale = max(1, min(size // max(grid_w, grid_h), 8))
-    map_w = grid_w * pixel_scale
-    map_h = grid_h * pixel_scale
-
-    # 创建小地图图像
-    minimap = np.zeros((map_h, map_w, 3), dtype=np.uint8)
-    minimap[:] = (30, 30, 30)  # 深灰底色
-
-    # 颜色定义
-    from grid_navigator import CELL_UNKNOWN, CELL_OPEN, CELL_VISITED, CELL_WALL
-    colors = {
-        CELL_UNKNOWN: (40, 40, 40),
-        CELL_OPEN: (100, 100, 100),
-        CELL_VISITED: (0, 180, 0),
-        CELL_WALL: (0, 0, 180),
-    }
-
-    # 画每个格子
-    for (gx, gy), state in cells.items():
-        px = (gx - min_gx) * pixel_scale
-        py = (gy - min_gy) * pixel_scale
-        color = colors.get(state, (40, 40, 40))
-        cv2.rectangle(minimap, (px, py), (px + pixel_scale - 1, py + pixel_scale - 1),
-                       color, cv2.FILLED)
-
-    # 画角色位置（黄色点）
-    import math
-    char_gx = int(math.floor(world_pos[0] / cell_size))
-    char_gy = int(math.floor(world_pos[1] / cell_size))
-    cx = (char_gx - min_gx) * pixel_scale + pixel_scale // 2
-    cy = (char_gy - min_gy) * pixel_scale + pixel_scale // 2
-    cv2.circle(minimap, (cx, cy), max(2, pixel_scale // 2), (0, 255, 255), -1)
-
-    # 画航点（白色 x）
+    # 画航点（黄色 x）
     if waypoint:
-        wp_gx = int(math.floor(waypoint[0] / cell_size))
-        wp_gy = int(math.floor(waypoint[1] / cell_size))
-        wpx = (wp_gx - min_gx) * pixel_scale + pixel_scale // 2
-        wpy = (wp_gy - min_gy) * pixel_scale + pixel_scale // 2
-        cv2.drawMarker(minimap, (wpx, wpy), (255, 255, 255),
-                        cv2.MARKER_CROSS, max(3, pixel_scale), 1)
-
-    # 限制小地图最大尺寸
-    if map_w > size or map_h > size:
-        scale = min(size / map_w, size / map_h)
-        minimap = cv2.resize(minimap, (int(map_w * scale), int(map_h * scale)),
-                              interpolation=cv2.INTER_NEAREST)
+        wpx = int(waypoint[0] * scale)
+        wpy = int(waypoint[1] * scale)
+        if 0 <= wpx < size and 0 <= wpy < size:
+            cv2.drawMarker(minimap, (wpx, wpy), (0, 255, 255),
+                            cv2.MARKER_CROSS, 5, 1)
 
     # 加边框
-    mh, mw = minimap.shape[:2]
-    cv2.rectangle(minimap, (0, 0), (mw - 1, mh - 1), (100, 100, 100), 1)
+    cv2.rectangle(minimap, (0, 0), (size - 1, size - 1), (100, 100, 100), 1)
 
-    # 放到主画面左下角（避开右下角 UI）
+    # 放到主画面右上角
     fh, fw = frame.shape[:2]
-    y_off = fh - mh - 40
-    x_off = 10
+    x_off = fw - size - 10
+    y_off = 30
 
-    if y_off > 0 and x_off + mw < fw:
-        frame[y_off:y_off + mh, x_off:x_off + mw] = minimap
+    if y_off + size < fh and x_off > 0:
+        frame[y_off:y_off + size, x_off:x_off + size] = minimap
 
     # 覆盖率文字
-    total = grid_data.get("total_cells", 0)
-    cov_text = f"Coverage: {coverage:.1%} ({total} cells)"
-    cv2.putText(frame, cov_text, (x_off, y_off + mh + 15),
-                FONT, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+    cov_text = f"Cover:{coverage:.1%} OCR:{ocr_rate:.0%} ({world_pos[0]},{world_pos[1]})"
+    cv2.putText(frame, cov_text, (x_off, y_off + size + 15),
+                FONT, 0.35, (0, 255, 255), 1, cv2.LINE_AA)
 
 
 def resize_for_display(frame):

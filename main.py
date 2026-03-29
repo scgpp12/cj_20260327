@@ -447,7 +447,7 @@ def main():
                         patrol.on_target_found()  # 暂停巡逻
 
                 if loop_count == 0: print("[DEBUG] 4-攻击/巡逻完成"); sys.stdout.flush()
-                # A* 可视化（不重复重建网格，find_path 已经在 _do_move 里调用）
+                # A* 可视化
                 if patrol.pathfinder is not None:
                     if patrol.state == "PATROL":
                         draw_pathfinder_overlay(display_frame, patrol.pathfinder)

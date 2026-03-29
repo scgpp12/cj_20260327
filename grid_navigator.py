@@ -1,7 +1,8 @@
 """
-grid_navigator.py - 网格覆盖寻路系统（扫地机器人模式）
-动态网格地图 + 相位相关定位 + BFS 前沿覆盖
-不需要预知地图大小，边走边建图。
+grid_navigator.py - 网格覆盖寻路系统（OCR精确坐标版）
+
+基于 OCR 读取游戏世界坐标（300×300地图），实现30分钟不走回头路。
+坐标系: 0:0=左上角, X向右, Y向下
 """
 
 import math
@@ -12,17 +13,14 @@ from collections import deque
 from config import (
     SELF_CENTER_X, SELF_CENTER_Y,
     PATROL_DARK_THRESHOLD,
-    GRID_CELL_SIZE, GRID_PHASE_ROI_W, GRID_PHASE_ROI_H,
-    GRID_MAX_SHIFT_PER_FRAME,
 )
 
 # 格子状态
 CELL_UNKNOWN = 0   # 未探索
-CELL_OPEN = 1      # 可走（扫描到亮色）
-CELL_VISITED = 2   # 已走过
-CELL_WALL = 3      # 墙壁/深渊
+CELL_VISITED = 1   # 已走过
+CELL_WALL = 2      # 墙壁/深渊
 
-# 8 方向（和 patrol_controller 一致）
+# 8 方向
 DIRECTIONS = {
     "UP":         (0, -1),
     "DOWN":       (0, 1),
@@ -34,356 +32,286 @@ DIRECTIONS = {
     "DOWN_RIGHT": (1, 1),
 }
 
-# 8 邻居偏移
 NEIGHBORS_8 = [(-1, -1), (0, -1), (1, -1),
                (-1, 0),           (1, 0),
                (-1, 1),  (0, 1),  (1, 1)]
 
 
 class GridMap:
-    """动态网格地图，用 dict 存储，自动扩展"""
+    """300×300 网格地图，1格 = 1个游戏坐标"""
 
-    def __init__(self, cell_size=64):
-        self.cell_size = cell_size
-        self.cells = {}  # {(gx, gy): state}
+    MAP_SIZE = 300
 
-    def world_to_grid(self, wx, wy):
-        """世界坐标 → 网格坐标"""
-        gx = int(math.floor(wx / self.cell_size))
-        gy = int(math.floor(wy / self.cell_size))
-        return gx, gy
+    def __init__(self):
+        self.visited = set()     # 已走过的坐标 {(x, y)}
+        self.walls = set()       # 墙壁坐标 {(x, y)}
 
-    def grid_to_world(self, gx, gy):
-        """网格坐标 → 世界坐标（格子中心）"""
-        wx = gx * self.cell_size + self.cell_size / 2
-        wy = gy * self.cell_size + self.cell_size / 2
-        return wx, wy
+    def mark_visited(self, x, y):
+        """标记坐标为已走过"""
+        if 0 <= x <= self.MAP_SIZE and 0 <= y <= self.MAP_SIZE:
+            self.visited.add((x, y))
 
-    def get_cell(self, gx, gy):
-        return self.cells.get((gx, gy), CELL_UNKNOWN)
+    def mark_wall(self, x, y):
+        """标记坐标为墙壁"""
+        if 0 <= x <= self.MAP_SIZE and 0 <= y <= self.MAP_SIZE:
+            if (x, y) not in self.visited:  # 已走过的不标墙
+                self.walls.add((x, y))
 
-    def set_cell(self, gx, gy, state):
-        current = self.cells.get((gx, gy), CELL_UNKNOWN)
-        # 不降级：VISITED 不会被覆盖为 OPEN
-        if current == CELL_VISITED and state == CELL_OPEN:
-            return
-        self.cells[(gx, gy)] = state
+    def is_visited(self, x, y):
+        return (x, y) in self.visited
 
-    def mark_visited(self, wx, wy):
-        gx, gy = self.world_to_grid(wx, wy)
-        self.cells[(gx, gy)] = CELL_VISITED
+    def is_wall(self, x, y):
+        return (x, y) in self.walls
 
-    def mark_walls_from_terrain(self, wx, wy, terrain_scores, dark_threshold):
-        """
-        根据 8 方向地形亮度扫描结果，标记周围格子。
-        terrain_scores: {"UP": brightness, "DOWN": ..., ...}
-        """
-        sample_distances = [80, 150, 220]
-
-        for d_name, (dx, dy) in DIRECTIONS.items():
-            brightness = terrain_scores.get(d_name, 0)
-
-            for dist in sample_distances:
-                # 方向上的世界坐标
-                sample_wx = wx + dx * dist
-                sample_wy = wy + dy * dist
-                gx, gy = self.world_to_grid(sample_wx, sample_wy)
-
-                current = self.get_cell(gx, gy)
-                if current == CELL_VISITED:
-                    continue  # 已走过的不改
-
-                if brightness < dark_threshold:
-                    self.set_cell(gx, gy, CELL_WALL)
-                else:
-                    if current == CELL_UNKNOWN:
-                        self.set_cell(gx, gy, CELL_OPEN)
+    def is_walkable(self, x, y):
+        """可走 = 在地图范围内 且 不是墙"""
+        return (0 <= x <= self.MAP_SIZE and
+                0 <= y <= self.MAP_SIZE and
+                (x, y) not in self.walls)
 
     def coverage_ratio(self):
-        """已覆盖比例"""
-        visited = sum(1 for v in self.cells.values() if v == CELL_VISITED)
-        walkable = sum(1 for v in self.cells.values() if v in (CELL_OPEN, CELL_VISITED))
-        if walkable == 0:
+        """覆盖率 = 已走 / (已走 + 未走可走区域)"""
+        total = len(self.visited)
+        if total == 0:
             return 0.0
-        return visited / walkable
+        # 简单用已走格子数 / 地图总面积（粗略估计）
+        return total / (self.MAP_SIZE * self.MAP_SIZE)
 
-    def get_bounds(self):
-        """获取已知区域的边界"""
-        if not self.cells:
-            return 0, 0, 0, 0
-        xs = [k[0] for k in self.cells]
-        ys = [k[1] for k in self.cells]
-        return min(xs), min(ys), max(xs), max(ys)
-
-
-class PositionTracker:
-    """用相位相关估算角色世界位置"""
-
-    def __init__(self, roi_w=600, roi_h=400, max_shift=30):
-        self.world_x = 0.0
-        self.world_y = 0.0
-        self.prev_gray = None
-        self.confidence = 0.0
-        self.roi_w = roi_w
-        self.roi_h = roi_h
-        self.max_shift = max_shift
-
-        # ROI 区域（居中于角色，避开 UI）
-        self.roi_x1 = SELF_CENTER_X - roi_w // 2
-        self.roi_y1 = SELF_CENTER_Y - roi_h // 2
-        self.roi_x2 = self.roi_x1 + roi_w
-        self.roi_y2 = self.roi_y1 + roi_h
-
-        # Hanning 窗口（减少边缘效应）
-        self.hanning = cv2.createHanningWindow((roi_w, roi_h), cv2.CV_32F)
-
-    def update(self, frame):
-        """
-        更新位置估算。返回 (dx, dy, confidence)
-        dx, dy 是世界坐标偏移（像素）
-        """
-        h, w = frame.shape[:2]
-
-        # 裁切 ROI，确保不越界
-        x1 = max(0, self.roi_x1)
-        y1 = max(0, self.roi_y1)
-        x2 = min(w, self.roi_x2)
-        y2 = min(h, self.roi_y2)
-
-        gray = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
-        gray = gray.astype(np.float32)
-
-        # 调整 Hanning 窗口尺寸（如果 ROI 被裁切了）
-        gh, gw = gray.shape
-        if gw != self.roi_w or gh != self.roi_h:
-            hanning = cv2.createHanningWindow((gw, gh), cv2.CV_32F)
-        else:
-            hanning = self.hanning
-
-        gray_windowed = gray * hanning
-
-        if self.prev_gray is None or self.prev_gray.shape != gray_windowed.shape:
-            self.prev_gray = gray_windowed
-            return 0.0, 0.0, 0.0
-
-        # 相位相关：检测画面平移
-        (dx, dy), confidence = cv2.phaseCorrelate(self.prev_gray, gray_windowed)
-
-        self.prev_gray = gray_windowed
-        self.confidence = confidence
-
-        # 画面向右移 = 角色向右走 = world_x 增加
-        # phaseCorrelate 返回的是 prev 到 curr 的偏移
-        # 如果画面右移（世界左移），dx > 0，角色实际向右走
-
-        # 限制最大偏移（防止异常跳变）
-        dist = math.sqrt(dx * dx + dy * dy)
-        if dist > self.max_shift:
-            # 异常大的偏移，可能是场景切换，忽略
-            return 0.0, 0.0, 0.0
-
-        # 低置信度也忽略
-        if confidence < 0.05:
-            return 0.0, 0.0, 0.0
-
-        # 累加到世界坐标
-        self.world_x += dx
-        self.world_y += dy
-
-        return dx, dy, confidence
-
-    def on_stuck(self):
-        """撞墙时调用，不更新位置"""
-        pass
+    def get_stats(self):
+        return {
+            "visited": len(self.visited),
+            "walls": len(self.walls),
+            "coverage": self.coverage_ratio(),
+        }
 
 
 class CoveragePlanner:
-    """BFS 前沿搜索覆盖规划"""
+    """蛇形扫描 + BFS 前沿搜索"""
 
     def __init__(self, grid_map):
         self.grid = grid_map
+        # 蛇形扫描状态
+        self._scan_y = 0         # 当前扫描行
+        self._scan_right = True  # True=从左到右, False=从右到左
+        self._scan_x = 0        # 当前扫描列
 
-    def find_nearest_frontier(self, wx, wy, max_search=2000):
+    def find_next_target(self, cur_x, cur_y, max_search=3000):
         """
-        BFS 找最近的未探索前沿格子。
-        返回 (gx, gy) 或 None（全部探索完）。
+        找下一个要走的未访问坐标。
+        优先蛇形扫描，失败则 BFS 找最近未访问格。
+
+        Returns:
+            (x, y) 或 None
         """
-        start = self.grid.world_to_grid(wx, wy)
+        # 策略1：蛇形扫描 — 找当前行最近的未访问格
+        target = self._snake_scan(cur_x, cur_y)
+        if target:
+            return target
+
+        # 策略2：BFS 找最近未访问格
+        return self._bfs_frontier(cur_x, cur_y, max_search)
+
+    def _snake_scan(self, cur_x, cur_y):
+        """蛇形行扫描：找当前或附近行的未访问格"""
+        grid = self.grid
+
+        # 从当前 Y 坐标开始搜索
+        for y_offset in range(0, grid.MAP_SIZE):
+            for sign in [0, 1, -1]:  # 先当前行，再上下
+                scan_y = cur_y + y_offset * (sign if sign != 0 else 1)
+                if scan_y < 0 or scan_y > grid.MAP_SIZE:
+                    continue
+
+                # 该行扫描方向
+                if scan_y % 2 == 0:
+                    x_range = range(0, grid.MAP_SIZE + 1)  # 左到右
+                else:
+                    x_range = range(grid.MAP_SIZE, -1, -1)  # 右到左
+
+                for x in x_range:
+                    if not grid.is_visited(x, scan_y) and grid.is_walkable(x, scan_y):
+                        return (x, scan_y)
+
+                if y_offset == 0:
+                    break  # y_offset=0 时只搜当前行
+
+        return None
+
+    def _bfs_frontier(self, cur_x, cur_y, max_search):
+        """BFS 找最近的未访问可走格"""
+        start = (cur_x, cur_y)
         queue = deque([start])
         visited_bfs = {start}
         searched = 0
 
         while queue and searched < max_search:
-            gx, gy = queue.popleft()
+            x, y = queue.popleft()
             searched += 1
 
-            for ngx, ngy in self._neighbors(gx, gy):
-                if (ngx, ngy) in visited_bfs:
+            for dx, dy in NEIGHBORS_8:
+                nx, ny = x + dx, y + dy
+                if (nx, ny) in visited_bfs:
                     continue
-                visited_bfs.add((ngx, ngy))
+                visited_bfs.add((nx, ny))
 
-                state = self.grid.get_cell(ngx, ngy)
+                if not self.grid.is_walkable(nx, ny):
+                    continue
 
-                if state == CELL_UNKNOWN:
-                    # 找到前沿！
-                    return (ngx, ngy)
+                if not self.grid.is_visited(nx, ny):
+                    return (nx, ny)  # 找到未访问格
 
-                if state in (CELL_OPEN, CELL_VISITED):
-                    queue.append((ngx, ngy))
-                # CELL_WALL: 不穿过
+                queue.append((nx, ny))
 
-        return None  # 全部探索完或被墙包围
-
-    def _neighbors(self, gx, gy):
-        """8 方向邻居"""
-        for dx, dy in NEIGHBORS_8:
-            yield gx + dx, gy + dy
+        return None
 
 
 class GridNavigator:
     """
-    网格覆盖导航器（外部接口）
-    结合 GridMap + PositionTracker + CoveragePlanner
+    网格覆盖导航器（OCR坐标版）
+    结合 GridMap + OCR CoordinateReader + CoveragePlanner
     """
 
-    def __init__(self, cell_size=None, dark_threshold=None):
-        cs = cell_size or GRID_CELL_SIZE
-        dt = dark_threshold or PATROL_DARK_THRESHOLD
-
-        self.grid = GridMap(cs)
-        self.tracker = PositionTracker(
-            roi_w=GRID_PHASE_ROI_W,
-            roi_h=GRID_PHASE_ROI_H,
-            max_shift=GRID_MAX_SHIFT_PER_FRAME,
-        )
+    def __init__(self):
+        self.grid = GridMap()
         self.planner = CoveragePlanner(self.grid)
-        self.dark_threshold = dt
+        self.dark_threshold = PATROL_DARK_THRESHOLD
 
-        self._waypoint = None         # 目标网格坐标 (gx, gy)
-        self._waypoint_world = None   # 目标世界坐标 (wx, wy)
-        self._arrived_threshold = cs * 0.7
+        # OCR 坐标读取器
+        from coordinate_reader import CoordinateReader
+        self.coord_reader = CoordinateReader()
+
+        # 当前位置
+        self.world_x = -1
+        self.world_y = -1
+
+        # 目标航点
+        self._waypoint = None    # (x, y) 游戏坐标
 
         # 统计
         self.total_steps = 0
-        self.frontier_count = 0
 
     def track_frame(self, frame):
         """
-        每帧调用，更新位置和网格（轻量操作）。
-        不做路径规划。
+        每帧调用：OCR 读取坐标，标记已访问。
         """
-        dx, dy, conf = self.tracker.update(frame)
-        wx, wy = self.tracker.world_x, self.tracker.world_y
-
-        # 标记当前位置为已走过
-        self.grid.mark_visited(wx, wy)
+        coord = self.coord_reader.read(frame)
+        if coord is not None:
+            old_x, old_y = self.world_x, self.world_y
+            self.world_x, self.world_y = coord
+            self.grid.mark_visited(self.world_x, self.world_y)
+            # 每10次成功读取打印一次
+            if self.coord_reader._total_success % 10 == 1:
+                stats = self.grid.get_stats()
+                print(f"[OCR] 坐标:({self.world_x},{self.world_y}) "
+                      f"已走:{stats['visited']}格 成功率:{self.coord_reader.success_rate:.0%}")
+        else:
+            if self.coord_reader._fail_count == 1:
+                print(f"[OCR] 读取失败, 上次坐标:({self.world_x},{self.world_y})")
 
     def get_direction(self, frame, terrain_scores=None):
         """
-        获取下一步方向。返回方向名（如 "UP_LEFT"）或 None。
-        terrain_scores: _scan_terrain() 的返回值，用于标记墙壁。
-        """
-        wx, wy = self.tracker.world_x, self.tracker.world_y
+        获取下一步方向。
 
-        # 用地形扫描结果更新网格墙壁
+        Returns:
+            方向名（如 "UP_LEFT"）或 None（全覆盖完）
+        """
+        if self.world_x < 0:
+            return None  # OCR 还没读到坐标
+
+        # 用地形亮度标墙
         if terrain_scores:
-            self.grid.mark_walls_from_terrain(wx, wy, terrain_scores, self.dark_threshold)
+            self._mark_walls_from_terrain(terrain_scores)
 
         # 检查是否到达航点
-        if self._waypoint_world is not None:
-            dist = math.sqrt(
-                (wx - self._waypoint_world[0]) ** 2 +
-                (wy - self._waypoint_world[1]) ** 2
-            )
-            if dist < self._arrived_threshold:
+        if self._waypoint is not None:
+            dist = abs(self.world_x - self._waypoint[0]) + abs(self.world_y - self._waypoint[1])
+            if dist <= 2:  # 曼哈顿距离 ≤ 2 视为到达
                 self._waypoint = None
-                self._waypoint_world = None
                 self.total_steps += 1
 
         # 需要新航点
         if self._waypoint is None:
-            frontier = self.planner.find_nearest_frontier(wx, wy)
-            if frontier is None:
+            target = self.planner.find_next_target(self.world_x, self.world_y)
+            if target is None:
                 return None  # 全部探索完
-
-            self._waypoint = frontier
-            self._waypoint_world = self.grid.grid_to_world(*frontier)
-            self.frontier_count += 1
+            self._waypoint = target
 
         # 计算方向
-        twx, twy = self._waypoint_world
-        return self._direction_to(wx, wy, twx, twy)
+        return self._direction_to(
+            self.world_x, self.world_y,
+            self._waypoint[0], self._waypoint[1]
+        )
 
     def on_stuck(self, current_dir=None):
-        """撞墙：在移动方向标记墙壁 + 扇形扩展，重新规划"""
-        wx, wy = self.tracker.world_x, self.tracker.world_y
+        """撞墙：标记前方为墙，重新规划"""
+        if self.world_x < 0:
+            return
 
         if current_dir and current_dir in DIRECTIONS:
             dx, dy = DIRECTIONS[current_dir]
 
             # 标记前方 1-5 格为墙
-            for dist_mult in range(1, 6):
-                wall_wx = wx + dx * self.grid.cell_size * dist_mult
-                wall_wy = wy + dy * self.grid.cell_size * dist_mult
-                gx, gy = self.grid.world_to_grid(wall_wx, wall_wy)
-                current = self.grid.get_cell(gx, gy)
-                if current != CELL_VISITED:
-                    self.grid.set_cell(gx, gy, CELL_WALL)
+            for i in range(1, 6):
+                wx = self.world_x + dx * i
+                wy = self.world_y + dy * i
+                self.grid.mark_wall(wx, wy)
 
-            # 也标记相邻方向的前方格子（扇形扩展，防止 BFS 从旁边绕过来选同一个前沿）
+            # 扇形扩展
             for ndx, ndy in NEIGHBORS_8:
-                # 只选和撞墙方向相近的邻居
                 dot = dx * ndx + dy * ndy
-                if dot > 0:  # 方向相似
-                    for dist_mult in range(1, 4):
-                        wall_wx = wx + ndx * self.grid.cell_size * dist_mult
-                        wall_wy = wy + ndy * self.grid.cell_size * dist_mult
-                        gx, gy = self.grid.world_to_grid(wall_wx, wall_wy)
-                        current = self.grid.get_cell(gx, gy)
-                        if current != CELL_VISITED:
-                            self.grid.set_cell(gx, gy, CELL_WALL)
+                if dot > 0:
+                    for i in range(1, 3):
+                        wx = self.world_x + ndx * i
+                        wy = self.world_y + ndy * i
+                        self.grid.mark_wall(wx, wy)
 
-        # 如果当前航点就在被标记为墙的方向上，也清掉
-        if self._waypoint is not None:
-            wp_state = self.grid.get_cell(*self._waypoint)
-            if wp_state == CELL_WALL:
-                self._waypoint = None
-                self._waypoint_world = None
-
-        # 清除航点，强制重新规划
+        # 清除航点，重新规划
         self._waypoint = None
-        self._waypoint_world = None
-        self.tracker.on_stuck()
 
-        # 打印调试
-        walls = sum(1 for v in self.grid.cells.values() if v == CELL_WALL)
-        visited = sum(1 for v in self.grid.cells.values() if v == CELL_VISITED)
-        print(f"[GRID] 地图状态: {len(self.grid.cells)} 格 (已走:{visited} 墙:{walls})")
+        stats = self.grid.get_stats()
+        print(f"[GRID] 撞墙标墙 已走:{stats['visited']} 墙:{stats['walls']} 覆盖:{stats['coverage']:.1%}")
+
+    def _mark_walls_from_terrain(self, terrain_scores):
+        """根据地形亮度标墙"""
+        if self.world_x < 0:
+            return
+
+        # 每个方向的亮度 → 估计几格外是墙
+        # 采样距离 80,150,220px ≈ 游戏坐标 2,4,6 格（粗略估计）
+        dist_to_grids = [2, 4, 6]
+
+        for d_name, (dx, dy) in DIRECTIONS.items():
+            brightness = terrain_scores.get(d_name, 255)
+            if brightness < self.dark_threshold:
+                for g in dist_to_grids:
+                    wx = self.world_x + dx * g
+                    wy = self.world_y + dy * g
+                    self.grid.mark_wall(wx, wy)
 
     def get_viz_data(self):
         """返回可视化数据"""
         return {
-            "cells": dict(self.grid.cells),  # 复制
-            "cell_size": self.grid.cell_size,
-            "world_pos": (self.tracker.world_x, self.tracker.world_y),
-            "waypoint": self._waypoint_world,
+            "visited": self.grid.visited.copy(),
+            "walls": self.grid.walls.copy(),
+            "map_size": self.grid.MAP_SIZE,
+            "world_pos": (self.world_x, self.world_y),
+            "waypoint": self._waypoint,
             "coverage": self.grid.coverage_ratio(),
-            "total_cells": len(self.grid.cells),
             "total_steps": self.total_steps,
+            "ocr_rate": self.coord_reader.success_rate,
         }
 
     def _direction_to(self, from_x, from_y, to_x, to_y):
-        """计算从 (from) 到 (to) 的 8 方向"""
+        """计算 8 方向"""
         dx = to_x - from_x
         dy = to_y - from_y
 
         if abs(dx) < 1 and abs(dy) < 1:
-            return "DOWN"  # 原地不动，默认向下
+            return "DOWN"
 
         angle = math.atan2(dy, dx)
         deg = math.degrees(angle)
 
-        # 角度 → 8 方向（右=0°, 下=90°, 左=±180°, 上=-90°）
         dir_angles = {
             "RIGHT": 0, "DOWN_RIGHT": 45, "DOWN": 90, "DOWN_LEFT": 135,
             "LEFT": 180, "UP_LEFT": -135, "UP": -90, "UP_RIGHT": -45,

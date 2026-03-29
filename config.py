@@ -80,8 +80,8 @@ POTION_ORB_RADIUS = 51          # 血球半径
 # ============================================================
 PATROL_ENABLED = True
 PATROL_IDLE_TIMEOUT = 1.0       # 无怪多少秒后开始巡逻
-PATROL_MOVE_INTERVAL = 2.5      # 每次移动间隔（秒）
-PATROL_CLICK_DISTANCE = 200     # 点击距离（像素）
+PATROL_MOVE_INTERVAL = 0.8      # 每次移动间隔（秒）
+PATROL_CLICK_DISTANCE = 300     # 右键点击距离（像素）
 PATROL_STUCK_TIMEOUT = 1.5      # 画面不动多少秒判定撞墙
 PATROL_STUCK_THRESHOLD = 10.0   # 画面差异阈值（提高减少误判）
 PATROL_DARK_THRESHOLD = 24      # 亮度低于此值视为深渊核心
@@ -99,13 +99,10 @@ PICK_WALK_TIMEOUT = 5.0         # 走路超时（秒）
 PICK_SKIP_DURATION = 30.0       # 跳过持续时间（秒）
 
 # ============================================================
-# 网格覆盖导航
+# 网格覆盖导航（OCR坐标版，300×300地图）
 # ============================================================
-GRID_CELL_SIZE = 64             # 每格像素（64px，一步≈3格）
-GRID_PHASE_ROI_W = 600          # 相位相关 ROI 宽度
-GRID_PHASE_ROI_H = 400          # 相位相关 ROI 高度
-GRID_MAX_SHIFT_PER_FRAME = 30   # 单帧最大偏移（防异常跳变）
-GRID_VIZ_ENABLED = False        # 显示小地图（暂时关闭，遮挡血球）
+GRID_MAP_SIZE = 300             # 地图尺寸
+GRID_VIZ_ENABLED = True         # 显示小地图
 
 # ============================================================
 # 显示窗口
