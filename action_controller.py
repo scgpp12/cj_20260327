@@ -113,6 +113,14 @@ class ActionController:
         # 近怪切换阈值
         self.CLOSE_RANGE = 60             # ≤60px 视为身边有怪
 
+        # 无效攻击检测：连续N轮连击打不到 → 放弃
+        self._ineffective_rounds = 0      # 连续无效连击轮数
+        self.MAX_INEFFECTIVE_ROUNDS = 3   # 3轮放弃
+
+        # 放弃冷却：放弃后5秒内只攻击近怪(≤100px)
+        self._giveup_time = 0
+        self.GIVEUP_COOLDOWN = 3.0
+
         # 巡逻控制器引用（攻击前释放右键）
         self._patrol_ref = None
 
@@ -212,6 +220,13 @@ class ActionController:
         # ===== 状态机（以下保证 targets 非空）=====
 
         if self.state == self.STATE_IDLE:
+            # 放弃冷却期间只攻击近怪(≤100px)
+            if now - self._giveup_time < self.GIVEUP_COOLDOWN:
+                near_targets = [t for t in targets if self._dist_to_self(t) <= 100]
+                if not near_targets:
+                    return self._make_info()  # 冷却中，远怪不管
+                targets = near_targets
+
             # 释放巡逻右键
             if self._patrol_ref is not None:
                 self._patrol_ref._release_rbutton()
@@ -220,6 +235,7 @@ class ActionController:
             self._prev_target_pos = None
             self.lock_count = 0
             self._burst_done = 0
+            self._ineffective_rounds = 0  # 新目标重置
             self.state = self.STATE_BURST
             dist = self._dist_to_self(self.locked_target)
             print(f"[ATK] 发现目标 dist={dist:.0f} → 连击锁敌")
@@ -261,9 +277,18 @@ class ActionController:
 
             # 固定2秒后重新连击（声波判断已废除）
             if wait_elapsed >= self.WAIT_RECHECK_INTERVAL:
-                print(f"[ATK] {wait_elapsed:.0f}秒等待 → 重新连击")
-                self._burst_done = 0
-                self.state = self.STATE_BURST
+                self._ineffective_rounds += 1
+                if self._ineffective_rounds >= self.MAX_INEFFECTIVE_ROUNDS:
+                    locked_dist = self._dist_to_self(self.locked_target) if self.locked_target else 0
+                    print(f"[ATK] {self._ineffective_rounds}轮无效攻击(dist={locked_dist:.0f}) → 放弃目标(冷却{self.GIVEUP_COOLDOWN:.0f}s)")
+                    self._ineffective_rounds = 0
+                    self._giveup_time = now
+                    self.locked_target = None
+                    self.state = self.STATE_IDLE
+                else:
+                    print(f"[ATK] {wait_elapsed:.0f}秒等待 → 重新连击({self._ineffective_rounds}/{self.MAX_INEFFECTIVE_ROUNDS})")
+                    self._burst_done = 0
+                    self.state = self.STATE_BURST
 
         return self._make_info()
 
@@ -285,6 +310,7 @@ class ActionController:
             self.locked_target = nearest
             self._prev_target_pos = None
             self._burst_done = 0
+            self._ineffective_rounds = 0  # 新目标重置
             self.state = self.STATE_BURST
 
     def _update_locked_target(self, targets):
