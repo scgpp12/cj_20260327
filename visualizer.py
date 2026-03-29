@@ -259,6 +259,26 @@ def draw_patrol_info(frame, patrol_info):
         cv2.arrowedLine(frame, (SELF_CENTER_X, SELF_CENTER_Y), (cx, cy), purple, 2, tipLength=0.25)
         cv2.circle(frame, (cx, cy), 8, purple, -1)  # 实心紫色圆点
 
+    # 已走格子重心：黄色五角星
+    centroid_screen = patrol_info.get("visited_centroid_screen")
+    if centroid_screen is not None:
+        import numpy as np
+        cx, cy = centroid_screen
+        # 限制在屏幕范围内
+        cx = max(20, min(fw - 20, cx))
+        cy = max(20, min(fh - 20, cy))
+        # 画五角星
+        r_out, r_in = 15, 6
+        pts = []
+        for i in range(10):
+            angle = np.radians(-90 + i * 36)
+            r = r_out if i % 2 == 0 else r_in
+            pts.append((int(cx + r * np.cos(angle)), int(cy + r * np.sin(angle))))
+        pts_arr = np.array(pts, dtype=np.int32)
+        cv2.fillPoly(frame, [pts_arr], (0, 255, 255))  # 黄色填充
+        cv2.polylines(frame, [pts_arr], True, (0, 180, 180), 2)  # 边框
+        _put_label(frame, "CENTROID", cx + 18, cy - 5, (0, 255, 255), scale=0.4)
+
 
 def draw_fps(frame, fps):
     _put_label(frame, f"FPS: {fps:.1f}", 10, 25, (0, 255, 255), scale=0.7)

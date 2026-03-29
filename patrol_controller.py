@@ -259,6 +259,13 @@ class PatrolController:
         visit_count = self._get_away_from_visited()
 
         if visit_count:
+            # 调试：显示各方向已走格子数
+            total_visited = sum(visit_count.values())
+            if total_visited > 0:
+                dist_info = " ".join(f"{d}:{v}" for d, v in
+                    sorted(visit_count.items(), key=lambda x: x[1], reverse=True) if v > 0)
+                print(f"[SCAN] 扇区分布: {dist_info} (共{total_visited}格)")
+
             # 按已走格子数排序（少→多），走得少的方向优先
             # 同时考虑地形亮度（避免选死路）
             scored = []
@@ -296,6 +303,20 @@ class PatrolController:
         self.info["direction"] = self.current_dir
         self.info["terrain"] = terrain
 
+        # 重心信息供可视化
+        centroid = getattr(self, '_visited_centroid', None)
+        if centroid and self.grid_nav and self.grid_nav.world_x >= 0:
+            # 世界坐标差值 → 屏幕像素偏移（粗略 1格≈40px）
+            gx, gy = self.grid_nav.world_x, self.grid_nav.world_y
+            cx_offset = (centroid[0] - gx) * 40
+            cy_offset = (centroid[1] - gy) * 40
+            self.info["visited_centroid_screen"] = (
+                int(SELF_CX + cx_offset),
+                int(SELF_CY + cy_offset)
+            )
+        else:
+            self.info["visited_centroid_screen"] = None
+
     def _get_away_from_visited(self):
         """
         计算已走格子的重心，返回远离重心的方向。
@@ -316,11 +337,15 @@ class PatrolController:
         # 统计每个方向扇区的已走格子数
         visit_count = {d: 0 for d in DIR_NAMES}
 
+        sum_x, sum_y, n = 0, 0, 0
         for (vx, vy) in visited:
             dx_i = vx - gx
             dy_i = vy - gy
             if dx_i == 0 and dy_i == 0:
                 continue
+            sum_x += vx
+            sum_y += vy
+            n += 1
             # 归一化为8方向
             ndx = 1 if dx_i > 0 else (-1 if dx_i < 0 else 0)
             ndy = 1 if dy_i > 0 else (-1 if dy_i < 0 else 0)
@@ -328,6 +353,12 @@ class PatrolController:
                 if ddx == ndx and ddy == ndy:
                     visit_count[d_name] += 1
                     break
+
+        # 计算重心（世界坐标）供可视化用
+        if n > 0:
+            self._visited_centroid = (sum_x / n, sum_y / n)
+        else:
+            self._visited_centroid = None
 
         return visit_count
 
