@@ -231,14 +231,18 @@ class GridNavigator:
         if self._waypoint is None:
             target = self.planner.find_next_target(self.world_x, self.world_y)
             if target is None:
+                print(f"[GRID] BFS找不到目标! pos=({self.world_x},{self.world_y}) "
+                      f"visited={len(self.grid.visited)} walls={len(self.grid.walls)}")
                 return None  # 全部探索完
             self._waypoint = target
+            print(f"[GRID] 新航点: ({target[0]},{target[1]}) 从({self.world_x},{self.world_y})")
 
         # 计算方向
-        return self._direction_to(
+        direction = self._direction_to(
             self.world_x, self.world_y,
             self._waypoint[0], self._waypoint[1]
         )
+        return direction
 
     def on_direction_failed(self, direction):
         """A*规划失败：标记该方向前方为墙，重新规划航点"""
