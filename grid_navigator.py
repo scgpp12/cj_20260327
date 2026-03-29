@@ -211,9 +211,8 @@ class GridNavigator:
         if self.world_x < 0:
             return None  # OCR 还没读到坐标
 
-        # 用地形亮度标墙
-        if terrain_scores:
-            self._mark_walls_from_terrain(terrain_scores)
+        # 地形标墙已禁用（太激进，会把BFS围死）
+        # 只依赖 A*失败 和 撞墙检测 来标墙
 
         # 检查是否到达航点
         if self._waypoint is not None:
