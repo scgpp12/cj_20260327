@@ -247,28 +247,44 @@ class PatrolController:
         C: 排除 blocked_dirs
         """
 
-        # 简洁版：地形最亮(远离墙) + 不回头 + 不走blocked
         terrain = self._scan_terrain(frame)
 
-        # 可选方向：排除 blocked + 排除回头
-        opposite = self._opposite(self.current_dir)
-        available = [d for d in DIR_NAMES
-                     if d not in self.blocked_dirs and d != opposite]
-        if not available:
-            # 全堵了，只排除回头
-            available = [d for d in DIR_NAMES if d != opposite]
+        # 可选方向：排除 blocked
+        available = [d for d in DIR_NAMES if d not in self.blocked_dirs]
         if not available:
             self.blocked_dirs.clear()
             available = DIR_NAMES[:]
 
-        # 按地形亮度排序（最亮 = 远离墙体 = 优先）
-        scored = [(d, terrain[d]) for d in available]
-        scored.sort(key=lambda x: x[1], reverse=True)
+        # === 核心：扫描周围已走格子，往走得少的方向走 ===
+        visit_count = self._scan_visited_directions()
 
-        self.current_dir = scored[0][0]
+        if visit_count:
+            # 按已走格子数排序（少→多），走得少的方向优先
+            # 同时考虑地形亮度（避免选死路）
+            scored = []
+            max_visit = max(visit_count.values()) or 1
+            for d in available:
+                # 未走比例 (0~1, 越高越好)
+                unvisited_ratio = 1.0 - (visit_count.get(d, 0) / (max_visit + 1))
+                # 地形亮度 (0~1, 越高越远离墙)
+                bright_ratio = terrain[d] / 255.0
+                # 综合：70% 看未走过 + 30% 看地形
+                score = unvisited_ratio * 0.7 + bright_ratio * 0.3
+                scored.append((d, score, visit_count.get(d, 0), terrain[d]))
 
-        top_info = " | ".join(f"{d}:{s:.0f}" for d, s in scored[:4])
-        print(f"[PATROL] 选方向: {top_info} → {self.current_dir}")
+            scored.sort(key=lambda x: x[1], reverse=True)
+            self.current_dir = scored[0][0]
+
+            top_info = " | ".join(
+                f"{d}:走{v}格,亮{t:.0f}({sc:.2f})" for d, sc, v, t in scored[:4])
+            print(f"[PATROL] 选方向: {top_info} → {self.current_dir}")
+        else:
+            # OCR 没读到坐标，用纯地形
+            scored = [(d, terrain[d]) for d in available]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            self.current_dir = scored[0][0]
+            top_info = " | ".join(f"{d}:{s:.0f}" for d, s in scored[:4])
+            print(f"[PATROL] 选方向(纯地形): {top_info} → {self.current_dir}")
 
         # 记录
         self.dir_visit_count[self.current_dir] = \
@@ -279,6 +295,45 @@ class PatrolController:
 
         self.info["direction"] = self.current_dir
         self.info["terrain"] = terrain
+
+    def _scan_visited_directions(self, radius=10):
+        """
+        扫描角色周围各方向的已走格子数。
+        以角色为圆心，半径 radius 格，8个方向各扫一个扇形。
+
+        Returns:
+            dict {方向名: 已走格子数} 或 None（OCR未就绪）
+        """
+        if self.grid_nav is None or self.grid_nav.world_x < 0:
+            return None
+
+        gx, gy = self.grid_nav.world_x, self.grid_nav.world_y
+        visit_count = {d: 0 for d in DIR_NAMES}
+
+        # 扫描圆形区域内的每个格子
+        for dx_i in range(-radius, radius + 1):
+            for dy_i in range(-radius, radius + 1):
+                if dx_i == 0 and dy_i == 0:
+                    continue
+                # 圆形范围检查
+                if dx_i * dx_i + dy_i * dy_i > radius * radius:
+                    continue
+
+                cx, cy = gx + dx_i, gy + dy_i
+                if not self.grid_nav.grid.is_visited(cx, cy):
+                    continue
+
+                # 判断这个格子属于哪个方向（归一化为8方向）
+                ndx = 1 if dx_i > 0 else (-1 if dx_i < 0 else 0)
+                ndy = 1 if dy_i > 0 else (-1 if dy_i < 0 else 0)
+
+                # 找匹配的方向名
+                for d_name, (ddx, ddy) in DIRECTIONS.items():
+                    if ddx == ndx and ddy == ndy:
+                        visit_count[d_name] += 1
+                        break
+
+        return visit_count
 
     def _do_move(self, frame, game_hwnd):
         """发送移动指令（右键点按走路，一步约80px/1秒）— 优先用 A* 规划"""
