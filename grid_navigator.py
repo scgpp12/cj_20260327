@@ -137,6 +137,7 @@ class CoveragePlanner:
         visited_bfs = {start}
         searched = 0
 
+        walls_hit = 0
         while queue and searched < max_search:
             x, y = queue.popleft()
             searched += 1
@@ -148,6 +149,7 @@ class CoveragePlanner:
                 visited_bfs.add((nx, ny))
 
                 if not self.grid.is_walkable(nx, ny):
+                    walls_hit += 1
                     continue
 
                 if not self.grid.is_visited(nx, ny):
@@ -155,6 +157,10 @@ class CoveragePlanner:
 
                 queue.append((nx, ny))
 
+        # 调试：为什么找不到？
+        print(f"[BFS] 失败! 起点=({cur_x},{cur_y}) 搜索={searched} "
+              f"墙={walls_hit} 队列空={len(queue)==0} "
+              f"visited={len(self.grid.visited)} walls={len(self.grid.walls)}")
         return None
 
 
