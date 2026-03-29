@@ -242,6 +242,24 @@ class GridNavigator:
             self._waypoint[0], self._waypoint[1]
         )
 
+    def on_direction_failed(self, direction):
+        """A*规划失败：标记该方向前方为墙，重新规划航点"""
+        if self.world_x < 0 or direction not in DIRECTIONS:
+            return
+
+        dx, dy = DIRECTIONS[direction]
+        # 标记前方 3-8 格为墙（A*看到的障碍通常比撞墙远）
+        for i in range(3, 9):
+            wx = self.world_x + dx * i
+            wy = self.world_y + dy * i
+            self.grid.mark_wall(wx, wy)
+
+        # 清除航点，下次 get_direction 会重新规划
+        self._waypoint = None
+
+        stats = self.grid.get_stats()
+        print(f"[GRID] A*失败标墙({direction}) 墙:{stats['walls']} 覆盖:{stats['coverage']:.1%}")
+
     def on_stuck(self, current_dir=None):
         """撞墙：标记前方为墙，重新规划"""
         if self.world_x < 0:

@@ -416,8 +416,10 @@ class PatrolController:
                 self.info["direction"] = f"A*{mode}"
                 print(f"[PATROL] A*{mode} -> walk({click_x},{click_y}) ({n_wp}个拐点)")
             else:
-                # A* 失败 → 换方向重试
+                # A* 失败 → 告诉Grid标墙，换方向重试
                 print(f"[PATROL] A*{mode} 失败，换方向")
+                if self.grid_nav is not None:
+                    self.grid_nav.on_direction_failed(self.current_dir)
                 self.blocked_dirs.add(self.current_dir)
                 self._pick_direction(frame)
                 dx, dy = DIRECTIONS[self.current_dir]
