@@ -386,15 +386,19 @@ def main():
                         cv2.putText(display_frame, label, (lx, ly - 10),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-                    # 攻击左键点击蓝点标记（显示在方位点上）
+                    # 攻击点击标记：Shift长按=紫色，普通左键=蓝色
                     if attacker.last_click_pos and \
                        time.time() - attacker.last_click_time < attacker.CLICK_SHOW_DURATION:
                         acx, acy = attacker.last_click_pos
-                        cv2.circle(display_frame, (acx, acy), 12, (255, 50, 50), -1)
+                        if attacker._shift_held:
+                            dot_color = (180, 0, 255)   # 紫色 (Shift+左键长按)
+                        else:
+                            dot_color = (255, 50, 50)   # 蓝色 (普通左键)
+                        cv2.circle(display_frame, (acx, acy), 12, dot_color, -1)
                         cv2.circle(display_frame, (acx, acy), 12, (255, 255, 255), 2)
                         dir_text = attacker.last_atk_dir or "ATK"
                         cv2.putText(display_frame, dir_text, (acx + 15, acy + 5),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 50, 50), 1)
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, dot_color, 1)
                 else:
                     # IDLE → 拾取 or 巡逻
                     attacker.on_target_lost()

@@ -18,16 +18,26 @@ import ctypes
 import ctypes.wintypes
 
 # Windows 消息常量
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONDOWN = 0x0204
 WM_RBUTTONUP = 0x0205
 MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
+MK_SHIFT = 0x0004
+VK_SHIFT = 0x10
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
 PostMessage = user32.PostMessageW
 FindWindow = user32.FindWindowW
+GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+GetCurrentThreadId = kernel32.GetCurrentThreadId
+AttachThreadInput = user32.AttachThreadInput
+SetKeyboardState = user32.SetKeyboardState
+GetKeyboardState = user32.GetKeyboardState
 EnumWindows = user32.EnumWindows
 GetWindowText = user32.GetWindowTextW
 GetWindowTextLength = user32.GetWindowTextLengthW
@@ -154,6 +164,9 @@ class ActionController:
         self.last_click_time = 0
         self.last_atk_dir = None      # 上次攻击方位名
         self.CLICK_SHOW_DURATION = 0.5
+
+        # Shift+左键长按状态
+        self._shift_held = False
 
         # 远距离位置追踪
         self._prev_target_pos = None
@@ -283,6 +296,7 @@ class ActionController:
                     print(f"[ATK] {self._ineffective_rounds}轮无效攻击(dist={locked_dist:.0f}) → 放弃目标(冷却{self.GIVEUP_COOLDOWN:.0f}s)")
                     self._ineffective_rounds = 0
                     self._giveup_time = now
+                    self._release_shift_click()
                     self.locked_target = None
                     self.state = self.STATE_IDLE
                 else:
@@ -392,6 +406,7 @@ class ActionController:
 
     def _reset_to_idle(self):
         """清除所有状态，回到 IDLE"""
+        self._release_shift_click()
         self.state = self.STATE_IDLE
         self.locked_target = None
         self.lock_count = 0
@@ -434,8 +449,8 @@ class ActionController:
 
         locked_dist = self._dist_to_self(self.locked_target)
 
-        if locked_dist <= 100:
-            # === 近距离：用9方位点攻击 ===
+        if locked_dist <= 60:
+            # === 近距离：用9方位点攻击（Shift+左键）===
             atk_idx = self._nearest_atk_index(self.locked_target)
             atk_name, ax, ay = self.atk_directions[atk_idx]
             self.last_atk_dir = atk_name
@@ -446,12 +461,50 @@ class ActionController:
 
         try:
             lparam = _make_lparam(ax, ay)
-            PostMessage(self.game_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
-            PostMessage(self.game_hwnd, WM_LBUTTONUP, 0, lparam)
+            if locked_dist <= 60:
+                # 近距离：Shift + 左键（原地攻击）
+                # 用 AttachThreadInput + SetKeyboardState 只改游戏线程的 Shift 状态
+                self._release_shift_click()
+                self._set_game_shift(True)
+                PostMessage(self.game_hwnd, WM_LBUTTONDOWN, MK_LBUTTON | MK_SHIFT, lparam)
+                PostMessage(self.game_hwnd, WM_LBUTTONUP, MK_SHIFT, lparam)
+                self._shift_held = True
+            else:
+                # 远距离：普通左键点击
+                self._release_shift_click()
+                PostMessage(self.game_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
+                PostMessage(self.game_hwnd, WM_LBUTTONUP, 0, lparam)
             self.last_click_pos = (int(ax), int(ay))
             self.last_click_time = time.time()
         except Exception as e:
             print(f"[ATK] 点击失败: {e}")
+
+    def _set_game_shift(self, pressed):
+        """设置游戏线程的 Shift 键状态（不影响其他窗口）"""
+        if self.game_hwnd is None:
+            return
+        try:
+            game_tid = GetWindowThreadProcessId(self.game_hwnd, None)
+            my_tid = GetCurrentThreadId()
+            # 附加到游戏线程
+            AttachThreadInput(my_tid, game_tid, True)
+            try:
+                # 读取当前键盘状态
+                key_state = (ctypes.c_ubyte * 256)()
+                GetKeyboardState(key_state)
+                # 设置 Shift 状态：0x80 = 按下，0x00 = 松开
+                key_state[VK_SHIFT] = 0x80 if pressed else 0x00
+                SetKeyboardState(key_state)
+            finally:
+                AttachThreadInput(my_tid, game_tid, False)
+        except Exception:
+            pass
+
+    def _release_shift_click(self):
+        """释放游戏线程的 Shift 键"""
+        if self._shift_held:
+            self._set_game_shift(False)
+            self._shift_held = False
 
     def _try_next_direction(self):
         """当前方位没打到 → 切换到下一个邻居"""

@@ -202,6 +202,22 @@ class PatrolController:
             self.grid_nav.track_frame(frame)
             self.info["grid_data"] = self.grid_nav.get_viz_data()
 
+            # 每帧更新已走格子重心（供五角星可视化）
+            if self.grid_nav.world_x >= 0 and len(self.grid_nav.grid.visited) >= 3:
+                visited = self.grid_nav.grid.visited
+                gx, gy = self.grid_nav.world_x, self.grid_nav.world_y
+                sx = sum(vx for vx, vy in visited)
+                sy = sum(vy for vx, vy in visited)
+                n = len(visited)
+                cx_offset = (sx / n - gx) * 40
+                cy_offset = (sy / n - gy) * 40
+                self.info["visited_centroid_screen"] = (
+                    int(SELF_CX + cx_offset),
+                    int(SELF_CY + cy_offset)
+                )
+            else:
+                self.info["visited_centroid_screen"] = None
+
         now = time.time()
 
         if self.state == "IDLE":
@@ -392,8 +408,7 @@ class PatrolController:
                     click_x, click_y = waypoints[0]
                 n_wp = len(waypoints)
                 self.info["direction"] = f"A*{mode}"
-                # A*成功 → 位置会变，清除旧的blocked
-                self.blocked_dirs.clear()
+                # A*成功 → 不清blocked（防止下帧又选失败方向）
                 print(f"[PATROL] A*{mode} -> walk({click_x},{click_y}) ({n_wp}个拐点)")
             else:
                 # A* 失败 → 告诉Grid标墙，换方向重试
@@ -412,9 +427,16 @@ class PatrolController:
                     self.info["direction"] = f"A*{mode}"
                     print(f"[PATROL] A*重试 -> walk({click_x},{click_y})")
                 else:
-                    # 还是失败 → 最亮方向直线走
+                    # 还是失败 → 最亮方向直线走（排除blocked）
+                    self.blocked_dirs.add(self.current_dir)
                     terrain = self._scan_terrain(frame)
-                    best_dir = max(terrain, key=terrain.get)
+                    # 过滤掉 blocked 方向
+                    available = {d: s for d, s in terrain.items()
+                                 if d not in self.blocked_dirs}
+                    if not available:
+                        self.blocked_dirs.clear()
+                        available = terrain
+                    best_dir = max(available, key=available.get)
                     dx, dy = DIRECTIONS[best_dir]
                     click_x = SELF_CX + int(dx * PATROL_CLICK_DISTANCE)
                     click_y = SELF_CY + int(dy * PATROL_CLICK_DISTANCE)
