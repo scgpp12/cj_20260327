@@ -223,7 +223,7 @@ class PatrolController:
                 return
 
             if now - self.last_move_time >= PATROL_MOVE_INTERVAL:
-                self._pick_direction(frame)  # 每步重新选方向（OCR坐标更新后避开已走区域）
+                # 保持当前方向直走，不换方向（撞墙/A*失败时才换）
                 self._do_move(frame, game_hwnd)
 
         elif self.state == "COMBAT":
@@ -241,145 +241,38 @@ class PatrolController:
 
     def _pick_direction(self, frame):
         """
-        选择巡逻方向。
-        优先用网格覆盖导航，fallback 到地形亮度评分。
+        选择巡逻方向（简洁版）：
+        A: 不走回头路（排除反方向）
+        B: 远离墙体（地形最亮）
+        C: 排除 blocked_dirs
         """
-        # ---- 网格覆盖模式 ----
-        if self.grid_nav is not None:
-            terrain = self._scan_terrain(frame)
 
-            # 直接把 blocked_dirs 传给 BFS，让它跳过这些方向
-            direction = self.grid_nav.get_direction(
-                frame, terrain, blocked_dirs=self.blocked_dirs)
-            if direction is not None:
-                self.current_dir = direction
-                self.dir_visit_count[self.current_dir] = \
-                    self.dir_visit_count.get(self.current_dir, 0) + 1
-                self.dir_history.append(self.current_dir)
-                if len(self.dir_history) > self.DIR_HISTORY_MAX:
-                    self.dir_history.pop(0)
-                self.info["direction"] = self.current_dir
-                cov = self.grid_nav.grid.coverage_ratio()
-                print(f"[GRID] → {self.current_dir} (覆盖率: {cov:.1%})")
-                return
-            else:
-                print("[GRID] 区域已全部覆盖，切回随机巡逻")
-
-        # ---- 原始地形亮度评分 ----
-        """
-        根据地面亮度选择巡逻方向（强防回头版）：
-        1. 扫描 8 方向地面亮度
-        2. 排除不可走 + 撞墙 + 回头方向
-        3. 亮度 × 新鲜度 × 反回头惩罚 → 综合评分
-        """
+        # 简洁版：地形最亮(远离墙) + 不回头 + 不走blocked
         terrain = self._scan_terrain(frame)
-        available = [d for d in DIR_NAMES if d not in self.blocked_dirs]
+
+        # 可选方向：排除 blocked + 排除回头
+        opposite = self._opposite(self.current_dir)
+        available = [d for d in DIR_NAMES
+                     if d not in self.blocked_dirs and d != opposite]
+        if not available:
+            # 全堵了，只排除回头
+            available = [d for d in DIR_NAMES if d != opposite]
         if not available:
             self.blocked_dirs.clear()
             available = DIR_NAMES[:]
 
-        # 过滤不可走方向
-        walkable = [d for d in available if terrain[d] >= PATROL_DARK_THRESHOLD]
-        if not walkable:
-            walkable = sorted(available, key=lambda d: terrain[d], reverse=True)[:3]
-
-        # 构建回头惩罚表：最近走过的方向 + 反方向都要惩罚
-        backtrack_penalty = {}
-        for d in DIR_NAMES:
-            backtrack_penalty[d] = 0.0
-
-        # 最近 N 步的反方向，惩罚递减（越近惩罚越重）
-        for i, past_dir in enumerate(reversed(self.dir_history)):
-            age = i + 1  # 1=最近一步, 2=前一步...
-            # 反方向：重惩罚
-            opp = self._opposite(past_dir)
-            if opp:
-                backtrack_penalty[opp] += 0.5 / age
-            # 同方向也轻微惩罚（避免来回折返）
-            backtrack_penalty[past_dir] += 0.2 / age
-            # 反方向的相邻方向也惩罚
-            if opp and opp in ADJACENT:
-                for adj in ADJACENT[opp]:
-                    backtrack_penalty[adj] += 0.15 / age
-
-        # 计算怪物方向加分
-        import math
-        monster_bonus = {d: 0.0 for d in DIR_NAMES}
-        if self._monster_hints:
-            dir_angles = {
-                "RIGHT": 0, "DOWN_RIGHT": 45, "DOWN": 90, "DOWN_LEFT": 135,
-                "LEFT": 180, "UP_LEFT": -135, "UP": -90, "UP_RIGHT": -45,
-            }
-            for mx, my in self._monster_hints:
-                # 怪物相对角色的角度
-                dx_m = mx - SELF_CX
-                dy_m = my - SELF_CY
-                if abs(dx_m) < 1 and abs(dy_m) < 1:
-                    continue
-                m_angle = math.degrees(math.atan2(dy_m, dx_m))
-
-                # 给最接近的方向加分
-                for d, d_angle in dir_angles.items():
-                    diff = abs(m_angle - d_angle)
-                    if diff > 180:
-                        diff = 360 - diff
-                    if diff < 45:  # 方向夹角 < 45° → 加分
-                        bonus = 0.3 * (1.0 - diff / 45.0)  # 越对准加分越多
-                        monster_bonus[d] = max(monster_bonus[d], bonus)
-
-        # OCR 坐标防回头：检查每个方向走5步的已访问比例
-        ocr_visited_penalty = {}
-        for d in DIR_NAMES:
-            ocr_visited_penalty[d] = 0.0
-        if self.grid_nav is not None and self.grid_nav.world_x >= 0:
-            gx, gy = self.grid_nav.world_x, self.grid_nav.world_y
-            for d in DIR_NAMES:
-                dx, dy = DIRECTIONS[d]
-                visited_count = 0
-                for step in range(1, 6):
-                    cx = gx + dx * step
-                    cy = gy + dy * step
-                    if self.grid_nav.grid.is_visited(cx, cy):
-                        visited_count += 1
-                ocr_visited_penalty[d] = visited_count / 5.0  # 0~1
-
-        # 综合评分
-        max_visits = max(self.dir_visit_count.values()) or 1
-        scored = []
-        for d in walkable:
-            brightness_score = terrain[d] / 255.0
-            freshness = 1.0 - (self.dir_visit_count[d] / (max_visits + 1))
-            penalty = min(backtrack_penalty[d], 0.8)
-            m_bonus = monster_bonus.get(d, 0.0)
-            ocr_penalty = ocr_visited_penalty.get(d, 0.0)
-
-            # 有怪物提示时：怪物方向权重 30%
-            if self._monster_hints:
-                total = (brightness_score * 0.35 + freshness * 0.15 +
-                         (1.0 - penalty) * 0.2 + m_bonus)
-            else:
-                total = brightness_score * 0.5 + freshness * 0.3 + (1.0 - penalty) * 0.2
-
-            # OCR 防回头：已走过的方向大幅降分
-            total *= (1.0 - ocr_penalty * 0.7)
-
-            scored.append((d, total, terrain[d]))
-
+        # 按地形亮度排序（最亮 = 远离墙体 = 优先）
+        scored = [(d, terrain[d]) for d in available]
         scored.sort(key=lambda x: x[1], reverse=True)
 
-        # 选得分最高的
-        if len(scored) >= 2 and scored[0][1] - scored[1][1] < 0.05:
-            self.current_dir = random.choice([scored[0][0], scored[1][0]])
-        else:
-            self.current_dir = scored[0][0]
+        self.current_dir = scored[0][0]
 
-        # 打印
-        top_info = " | ".join(f"{d}:{s:.0f}({sc:.2f})" for d, sc, s in scored[:4])
-        hint_str = f" 怪物方向加分:{len(self._monster_hints)}只" if self._monster_hints else ""
-        print(f"[PATROL] 地形: {top_info} → 选{self.current_dir}{hint_str}")
+        top_info = " | ".join(f"{d}:{s:.0f}" for d, s in scored[:4])
+        print(f"[PATROL] 选方向: {top_info} → {self.current_dir}")
 
         # 记录
-        self.dir_visit_count[self.current_dir] += 1
+        self.dir_visit_count[self.current_dir] = \
+            self.dir_visit_count.get(self.current_dir, 0) + 1
         self.dir_history.append(self.current_dir)
         if len(self.dir_history) > self.DIR_HISTORY_MAX:
             self.dir_history.pop(0)
