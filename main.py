@@ -578,8 +578,6 @@ def main():
                 cv2.imshow("Game Detector", show_frame)
                 cv2.setMouseCallback("Game Detector", _mouse_cb)
                 loop_count += 1
-                if loop_count <= 3:
-
 
             # =========================================
             # 按键处理
