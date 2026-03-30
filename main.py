@@ -378,10 +378,7 @@ def main():
                     if attacker.last_click_pos and \
                        time.time() - attacker.last_click_time < attacker.CLICK_SHOW_DURATION:
                         acx, acy = attacker.last_click_pos
-                        if attacker._shift_held:
-                            dot_color = (180, 0, 255)   # 紫色 (Shift+左键长按)
-                        else:
-                            dot_color = (255, 50, 50)   # 蓝色 (普通左键)
+                        dot_color = (255, 50, 50)   # 蓝色 (攻击点击)
                         cv2.circle(display_frame, (acx, acy), 12, dot_color, -1)
                         cv2.circle(display_frame, (acx, acy), 12, (255, 255, 255), 2)
                         dir_text = attacker.last_atk_dir or "ATK"
