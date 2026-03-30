@@ -226,12 +226,9 @@ def main():
                     time.sleep(0.1)
                     continue
 
-                if loop_count == 0:
-                    print(f"[DEBUG] 第一帧: {frame.shape} mean={frame.mean():.1f}")
-                    import sys; sys.stdout.flush()
 
                 display_frame = frame.copy()
-                if loop_count == 0: print("[DEBUG] 1-copy OK"); sys.stdout.flush()
+
                 target_count = 0
                 all_targets = []  # (x, y, w, h) 列表，供攻击系统使用
 
@@ -243,9 +240,9 @@ def main():
 
                 if redball_detector is not None:
                     # ---- 红球检测（最高优先级）----
-                    if loop_count == 0: print("[DEBUG] 2-redball开始"); sys.stdout.flush()
+
                     balls = redball_detector.detect(frame)
-                    if loop_count == 0: print(f"[DEBUG] 2-redball完成: {len(balls)}个"); sys.stdout.flush()
+
 
                     # 画近身优先检测绿框
                     if hasattr(redball_detector, 'near_box'):
@@ -319,8 +316,8 @@ def main():
                 cv2.circle(display_frame, (SELF_CENTER_X, SELF_CENTER_Y), 6, (255, 0, 255), -1)
                 cv2.circle(display_frame, (SELF_CENTER_X, SELF_CENTER_Y), 8, (255, 0, 255), 1)
 
-                if loop_count == 0: print("[DEBUG] 3-tracker完成"); sys.stdout.flush()
-                if loop_count == 0: print("[DEBUG] 3a-声音检测开始"); sys.stdout.flush()
+
+
                 # 画攻击范围 + 距离线
                 draw_attack_range(display_frame, radius=300)
                 draw_distance_lines(display_frame, all_targets)
@@ -332,7 +329,7 @@ def main():
                     audio_state = audio_det.get_state()
                     attacker.set_audio_state(audio_state.get("attack_hit", False))
 
-                if loop_count == 0: print("[DEBUG] 3b-攻击/巡逻开始"); sys.stdout.flush()
+
                 # =========================================
                 # 攻击 or 巡逻
                 # =========================================
@@ -392,7 +389,7 @@ def main():
                         patrol._moved_since_last_check = False
                     patrol.clear_chase_target()
 
-                    if loop_count == 0: print("[DEBUG] 3c-IDLE分支,准备拾取"); sys.stdout.flush()
+
                     # ---- 物品拾取（优先级高于巡逻）----
                     pick_active = False
                     if item_picker is not None and item_picker.enabled:
@@ -433,7 +430,7 @@ def main():
                             cv2.putText(display_frame, "CLICK", (cx + 15, cy + 5),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
-                    if loop_count == 0: print("[DEBUG] 3d-拾取完成,准备巡逻"); sys.stdout.flush()
+
                     # ---- 巡逻（拾取不活跃时）----
                     if not pick_active:
                         # 把远处稳定怪物位置告诉巡逻器
@@ -450,7 +447,7 @@ def main():
                         # 拾取中 → 停止巡逻移动
                         patrol.on_target_found()  # 暂停巡逻
 
-                if loop_count == 0: print("[DEBUG] 4-攻击/巡逻完成"); sys.stdout.flush()
+
                 # A* 可视化
                 if patrol.pathfinder is not None:
                     if patrol.state == "PATROL":
@@ -577,12 +574,12 @@ def main():
                 else:
                     show_frame = resize_for_display(display_frame)
 
-                if loop_count == 0: print("[DEBUG] 5-准备显示"); sys.stdout.flush()
+
                 cv2.imshow("Game Detector", show_frame)
                 cv2.setMouseCallback("Game Detector", _mouse_cb)
                 loop_count += 1
                 if loop_count <= 3:
-                    print(f"[DEBUG] 帧{loop_count} 显示完成"); sys.stdout.flush()
+
 
             # =========================================
             # 按键处理
