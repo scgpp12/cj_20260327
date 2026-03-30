@@ -95,6 +95,14 @@ class RedBallDetector:
         nx2 = min(w, self.self_cx + NEAR_HALF)
         ny2 = min(h, self.self_cy + NEAR_HALF - NEAR_UP_OFFSET)
 
+        # 排除角色自身区域（血条/装备可能有红色）
+        SELF_EXCLUDE = 25
+        sx1 = max(0, self.self_cx - SELF_EXCLUDE)
+        sy1 = max(0, self.self_cy - SELF_EXCLUDE)
+        sx2 = min(w, self.self_cx + SELF_EXCLUDE)
+        sy2 = min(h, self.self_cy + SELF_EXCLUDE)
+        full_mask[sy1:sy2, sx1:sx2] = 0
+
         # 保存近身框坐标供可视化
         self.near_box = (nx1, ny1, nx2, ny2)
 
