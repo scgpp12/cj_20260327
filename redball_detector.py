@@ -88,7 +88,7 @@ class RedBallDetector:
 
         # ======= 分两阶段检测 =======
         # 阶段1: 近身优先区 (100×100 绿框)
-        NEAR_HALF = 50
+        NEAR_HALF = 65  # 130x130 绿框
         NEAR_UP_OFFSET = 40  # 整体上移40px
         nx1 = max(0, self.self_cx - NEAR_HALF)
         ny1 = max(0, self.self_cy - NEAR_HALF - NEAR_UP_OFFSET)
@@ -98,44 +98,36 @@ class RedBallDetector:
         # 保存近身框坐标供可视化
         self.near_box = (nx1, ny1, nx2, ny2)
 
-        # 全屏检测一次，然后按中心坐标分近/远
-        all_results = self._detect_from_mask(full_mask, 0, 0, w, h)
-
-        # 按中心是否在绿框内分组
-        near_results = [r for r in all_results
-                        if nx1 <= r["center"][0] <= nx2 and ny1 <= r["center"][1] <= ny2]
-
-        # 每20帧打印一次
-        self._detect_frame_count = getattr(self, '_detect_frame_count', 0) + 1
-        if self._detect_frame_count % 20 == 0:
-            near_dists = [f"{r['dist']:.0f}" for r in near_results]
-            all_dists = [f"{r['dist']:.0f}" for r in all_results]
-            print(f"[DETECT] 绿框:{len(near_results)}个{near_dists} 全屏:{len(all_results)}个{all_dists}")
-
+        # 阶段1: 绿框内检测（低门槛：min_area=50，无圆形度）
+        near_results = self._detect_from_mask(full_mask, nx1, ny1, nx2, ny2,
+                                               min_area_override=50, skip_circularity=True)
         if near_results:
             near_results.sort(key=lambda r: r["dist"])
             return near_results
 
+        # 阶段2: 绿框内没有 → 全屏检测（正常门槛）
+        all_results = self._detect_from_mask(full_mask, 0, 0, w, h)
         all_results.sort(key=lambda r: r["dist"])
         return all_results
 
-    def _detect_from_mask(self, full_mask, x1, y1, x2, y2):
+    def _detect_from_mask(self, full_mask, x1, y1, x2, y2,
+                          min_area_override=None, skip_circularity=False):
         """从指定区域的 mask 中检测红球"""
-        # 裁剪区域
         roi_mask = np.zeros_like(full_mask)
         roi_mask[y1:y2, x1:x2] = full_mask[y1:y2, x1:x2]
 
         contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        use_min_area = min_area_override if min_area_override is not None else self.min_area
+
         results = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < self.min_area:
+            if area < use_min_area:
                 continue
 
             if area <= self.max_area:
-                # 小面积：面积>5000跳过圆形度（大块必定是红球不是噪点）
-                if area < 5000:
+                if not skip_circularity and area < 5000:
                     perimeter = cv2.arcLength(cnt, True)
                     if perimeter < 1:
                         continue
