@@ -91,37 +91,73 @@ class RedBallDetector:
         # 找轮廓
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        # 单个红球的典型面积（用于估算粘连数量）
+        SINGLE_BALL_AREA = 2000
+
         results = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < self.min_area or area > self.max_area:
+            if area < self.min_area:
                 continue
 
-            # 圆形度 = 4π × 面积 / 周长²
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter < 1:
-                continue
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-            if circularity < self.min_circularity:
-                continue
+            # 小面积：正常单个红球
+            if area <= self.max_area:
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter < 1:
+                    continue
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+                if circularity < self.min_circularity:
+                    continue
 
-            # 边界框
-            x, y, bw, bh = cv2.boundingRect(cnt)
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                cx = x + bw // 2
+                cy = y + bh // 2
+                dist = ((cx - self.self_cx) ** 2 + (cy - self.self_cy) ** 2) ** 0.5
 
-            # 中心点
-            cx = x + bw // 2
-            cy = y + bh // 2
+                results.append({
+                    "box": (x, y, bw, bh),
+                    "center": (cx, cy),
+                    "area": int(area),
+                    "circularity": 0,
+                    "dist": dist,
+                })
+            else:
+                # 大面积：多个红球粘连，用距离变换拆分
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                roi_mask = mask[y:y+bh, x:x+bw].copy()
 
-            # 到角色的距离
-            dist = ((cx - self.self_cx) ** 2 + (cy - self.self_cy) ** 2) ** 0.5
+                # 距离变换找各红球中心
+                dist_transform = cv2.distanceTransform(roi_mask, cv2.DIST_L2, 5)
+                _, max_val, _, _ = cv2.minMaxLoc(dist_transform)
+                if max_val < 3:
+                    continue
+                # 阈值取距离最大值的50%
+                _, sure_fg = cv2.threshold(dist_transform, max_val * 0.5, 255, 0)
+                sure_fg = np.uint8(sure_fg)
 
-            results.append({
-                "box": (x, y, bw, bh),
-                "center": (cx, cy),
-                "area": int(area),
-                "circularity": circularity,
-                "dist": dist,
-            })
+                # 找分离后的连通区域
+                n_labels, labels = cv2.connectedComponents(sure_fg)
+                for label_id in range(1, n_labels):
+                    pts = np.where(labels == label_id)
+                    if len(pts[0]) < 10:
+                        continue
+                    # 连通区域中心（相对ROI）
+                    cy_local = int(np.mean(pts[0]))
+                    cx_local = int(np.mean(pts[1]))
+                    # 转回全图坐标
+                    cx_abs = x + cx_local
+                    cy_abs = y + cy_local
+                    dist = ((cx_abs - self.self_cx) ** 2 + (cy_abs - self.self_cy) ** 2) ** 0.5
+
+                    # 给每个拆分出的球一个小 bounding box
+                    ball_r = 20
+                    results.append({
+                        "box": (cx_abs - ball_r, cy_abs - ball_r, ball_r * 2, ball_r * 2),
+                        "center": (cx_abs, cy_abs),
+                        "area": int(area // max(n_labels - 1, 1)),
+                        "circularity": 0,
+                        "dist": dist,
+                    })
 
         # 按距离排序
         results.sort(key=lambda r: r["dist"])
