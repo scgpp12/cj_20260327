@@ -89,10 +89,11 @@ class RedBallDetector:
         # ======= 分两阶段检测 =======
         # 阶段1: 近身优先区 (100×100 绿框)
         NEAR_HALF = 50
+        NEAR_UP_OFFSET = 40  # 整体上移40px
         nx1 = max(0, self.self_cx - NEAR_HALF)
-        ny1 = max(0, self.self_cy - NEAR_HALF)
+        ny1 = max(0, self.self_cy - NEAR_HALF - NEAR_UP_OFFSET)
         nx2 = min(w, self.self_cx + NEAR_HALF)
-        ny2 = min(h, self.self_cy + NEAR_HALF)
+        ny2 = min(h, self.self_cy + NEAR_HALF - NEAR_UP_OFFSET)
 
         # 保存近身框坐标供可视化
         self.near_box = (nx1, ny1, nx2, ny2)

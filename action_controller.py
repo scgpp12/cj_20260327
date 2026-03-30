@@ -144,6 +144,10 @@ class ActionController:
         self.TARGET_POS_CHANGE_THRESH = 15
         self._last_reclick_time = 0
 
+        # 近身优先：3帧投票，只要1帧绿框内有怪就优先攻击
+        self._near_history = [False, False, False]  # 最近3帧是否有近怪
+        self._near_frame_idx = 0
+
     def set_hwnd(self, hwnd):
         self.game_hwnd = hwnd
 
@@ -169,6 +173,15 @@ class ActionController:
             return self._make_info()
 
         self._target_gone_time = 0
+
+        # ===== 近身优先投票（3帧中1帧有近怪就优先）=====
+        near_targets = [t for t in targets if self._dist_to_self(t) <= 100]
+        self._near_history[self._near_frame_idx % 3] = len(near_targets) > 0
+        self._near_frame_idx += 1
+
+        # 3帧中有任意1帧检测到近怪 → 只用近怪列表
+        if any(self._near_history) and near_targets:
+            targets = near_targets
 
         # ===== 状态机 =====
         if self.state == self.STATE_IDLE:
