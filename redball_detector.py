@@ -70,29 +70,50 @@ class RedBallDetector:
         # 双范围红色掩码
         mask1 = cv2.inRange(hsv, self.red_lower1, self.red_upper1)
         mask2 = cv2.inRange(hsv, self.red_lower2, self.red_upper2)
-        mask = mask1 | mask2
+        full_mask = mask1 | mask2
 
         # 排除 UI 区域
         left_px = int(w * self.exclude_left)
         bottom_px = int(h * (1 - self.exclude_bottom))
-        mask[:, :left_px] = 0                          # 左侧面板
-        mask[bottom_px:, :] = 0                        # 底部 UI
+        full_mask[:, :left_px] = 0
+        full_mask[bottom_px:, :] = 0
         rt_x = int(w * self.exclude_right_top[0])
         rt_y = int(h * self.exclude_right_top[1])
-        mask[:rt_y, rt_x:] = 0                         # 右上小地图
+        full_mask[:rt_y, rt_x:] = 0
 
-        # 角色中心死区已取消（不再排除，避免漏检身边的怪）
-
-        # 形态学处理：闭运算连接碎片 + 开运算去噪
+        # 形态学处理
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        full_mask = cv2.morphologyEx(full_mask, cv2.MORPH_CLOSE, kernel)
+        full_mask = cv2.morphologyEx(full_mask, cv2.MORPH_OPEN, kernel)
 
-        # 找轮廓
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # ======= 分两阶段检测 =======
+        # 阶段1: 近身优先区 (100×100 绿框)
+        NEAR_HALF = 50
+        nx1 = max(0, self.self_cx - NEAR_HALF)
+        ny1 = max(0, self.self_cy - NEAR_HALF)
+        nx2 = min(w, self.self_cx + NEAR_HALF)
+        ny2 = min(h, self.self_cy + NEAR_HALF)
 
-        # 单个红球的典型面积（用于估算粘连数量）
-        SINGLE_BALL_AREA = 2000
+        # 保存近身框坐标供可视化
+        self.near_box = (nx1, ny1, nx2, ny2)
+
+        near_results = self._detect_from_mask(full_mask, nx1, ny1, nx2, ny2)
+        if near_results:
+            near_results.sort(key=lambda r: r["dist"])
+            return near_results
+
+        # 阶段2: 全屏检测（近身区以外）
+        all_results = self._detect_from_mask(full_mask, 0, 0, w, h)
+        all_results.sort(key=lambda r: r["dist"])
+        return all_results
+
+    def _detect_from_mask(self, full_mask, x1, y1, x2, y2):
+        """从指定区域的 mask 中检测红球"""
+        # 裁剪区域
+        roi_mask = np.zeros_like(full_mask)
+        roi_mask[y1:y2, x1:x2] = full_mask[y1:y2, x1:x2]
+
+        contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         results = []
         for cnt in contours:
@@ -100,20 +121,20 @@ class RedBallDetector:
             if area < self.min_area:
                 continue
 
-            # 小面积：正常单个红球
             if area <= self.max_area:
-                perimeter = cv2.arcLength(cnt, True)
-                if perimeter < 1:
-                    continue
-                circularity = 4 * np.pi * area / (perimeter * perimeter)
-                if circularity < self.min_circularity:
-                    continue
+                # 小面积：面积>5000跳过圆形度（大块必定是红球不是噪点）
+                if area < 5000:
+                    perimeter = cv2.arcLength(cnt, True)
+                    if perimeter < 1:
+                        continue
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    if circularity < self.min_circularity:
+                        continue
 
                 x, y, bw, bh = cv2.boundingRect(cnt)
                 cx = x + bw // 2
                 cy = y + bh // 2
                 dist = ((cx - self.self_cx) ** 2 + (cy - self.self_cy) ** 2) ** 0.5
-
                 results.append({
                     "box": (x, y, bw, bh),
                     "center": (cx, cy),
@@ -122,34 +143,27 @@ class RedBallDetector:
                     "dist": dist,
                 })
             else:
-                # 大面积：多个红球粘连，用距离变换拆分
+                # 大面积粘连：距离变换拆分
                 x, y, bw, bh = cv2.boundingRect(cnt)
-                roi_mask = mask[y:y+bh, x:x+bw].copy()
+                blob_mask = full_mask[y:y+bh, x:x+bw].copy()
 
-                # 距离变换找各红球中心
-                dist_transform = cv2.distanceTransform(roi_mask, cv2.DIST_L2, 5)
+                dist_transform = cv2.distanceTransform(blob_mask, cv2.DIST_L2, 5)
                 _, max_val, _, _ = cv2.minMaxLoc(dist_transform)
                 if max_val < 3:
                     continue
-                # 阈值取距离最大值的50%
                 _, sure_fg = cv2.threshold(dist_transform, max_val * 0.5, 255, 0)
                 sure_fg = np.uint8(sure_fg)
 
-                # 找分离后的连通区域
                 n_labels, labels = cv2.connectedComponents(sure_fg)
                 for label_id in range(1, n_labels):
                     pts = np.where(labels == label_id)
                     if len(pts[0]) < 10:
                         continue
-                    # 连通区域中心（相对ROI）
                     cy_local = int(np.mean(pts[0]))
                     cx_local = int(np.mean(pts[1]))
-                    # 转回全图坐标
                     cx_abs = x + cx_local
                     cy_abs = y + cy_local
                     dist = ((cx_abs - self.self_cx) ** 2 + (cy_abs - self.self_cy) ** 2) ** 0.5
-
-                    # 给每个拆分出的球一个小 bounding box
                     ball_r = 20
                     results.append({
                         "box": (cx_abs - ball_r, cy_abs - ball_r, ball_r * 2, ball_r * 2),
@@ -159,6 +173,4 @@ class RedBallDetector:
                         "dist": dist,
                     })
 
-        # 按距离排序
-        results.sort(key=lambda r: r["dist"])
         return results

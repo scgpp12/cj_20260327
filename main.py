@@ -154,7 +154,7 @@ def main():
     hp_detector = HPDetector()
 
     game_hwnd = find_game_hwnd()
-    attacker = ActionController(click_cooldown=AUTO_ATTACK_COOLDOWN, game_hwnd=game_hwnd)
+    attacker = ActionController(game_hwnd=game_hwnd)
     if game_hwnd:
         attacker.set_hwnd(game_hwnd)
     attacker.enabled = AUTO_ATTACK_ENABLED
@@ -246,6 +246,11 @@ def main():
                     if loop_count == 0: print("[DEBUG] 2-redball开始"); sys.stdout.flush()
                     balls = redball_detector.detect(frame)
                     if loop_count == 0: print(f"[DEBUG] 2-redball完成: {len(balls)}个"); sys.stdout.flush()
+
+                    # 画近身优先检测绿框
+                    if hasattr(redball_detector, 'near_box'):
+                        nb = redball_detector.near_box
+                        cv2.rectangle(display_frame, (nb[0], nb[1]), (nb[2], nb[3]), (0, 255, 0), 2)
                     for b in balls:
                         bx, by, bw, bh = b["box"]
                         cx, cy = b["center"]
@@ -327,23 +332,6 @@ def main():
                     audio_state = audio_det.get_state()
                     attacker.set_audio_state(audio_state.get("attack_hit", False))
 
-                # 简单画面变化检测（用帧差判断角色是否在动）
-                if hasattr(attacker, '_prev_frame_gray'):
-                    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    roi_y1 = max(0, SELF_CENTER_Y - 100)
-                    roi_y2 = min(frame.shape[0], SELF_CENTER_Y + 100)
-                    roi_x1 = max(0, SELF_CENTER_X - 100)
-                    roi_x2 = min(frame.shape[1], SELF_CENTER_X + 100)
-                    diff = cv2.absdiff(
-                        attacker._prev_frame_gray[roi_y1:roi_y2, roi_x1:roi_x2],
-                        curr_gray[roi_y1:roi_y2, roi_x1:roi_x2]
-                    )
-                    is_moving = diff.mean() > 3.0
-                    attacker.set_visual_state(is_moving)
-                    attacker._prev_frame_gray = curr_gray
-                else:
-                    attacker._prev_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
                 if loop_count == 0: print("[DEBUG] 3b-攻击/巡逻开始"); sys.stdout.flush()
                 # =========================================
                 # 攻击 or 巡逻
@@ -404,7 +392,6 @@ def main():
                     attacker.on_target_lost()
                     # 只有角色实际移动了才清除误检标记
                     if getattr(patrol, '_moved_since_last_check', False):
-                        attacker.clear_false_targets()
                         patrol._moved_since_last_check = False
                     patrol.clear_chase_target()
 
