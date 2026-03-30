@@ -242,7 +242,7 @@ def draw_patrol_info(frame, patrol_info):
     if terrain and state in ("PATROL", "IDLE", "STUCK"):
         for d_name, score in terrain.items():
             dx, dy = DIRECTIONS[d_name]
-            line_len = int(80 * min(score / 150.0, 1.0)) + 20
+            line_len = int(25 * min(score / 150.0, 1.0)) + 5
             ex = SELF_CENTER_X + int(dx * line_len)
             ey = SELF_CENTER_Y + int(dy * line_len)
             if score < PATROL_DARK_THRESHOLD:
@@ -251,7 +251,6 @@ def draw_patrol_info(frame, patrol_info):
                 g = int(min(score / 150.0, 1.0) * 255)
                 lc = (0, g, 0)
             cv2.line(frame, (SELF_CENTER_X, SELF_CENTER_Y), (ex, ey), lc, 2)
-            _put_label(frame, f"{score:.0f}", ex, ey - 5, lc, scale=0.35)
 
     if click_pos is not None and state in ("PATROL", "STUCK"):
         cx, cy = click_pos

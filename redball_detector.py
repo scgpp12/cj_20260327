@@ -95,24 +95,27 @@ class RedBallDetector:
         nx2 = min(w, self.self_cx + NEAR_HALF)
         ny2 = min(h, self.self_cy + NEAR_HALF - NEAR_UP_OFFSET)
 
-        # 排除角色自身区域（血条/装备可能有红色）
-        SELF_EXCLUDE = 25
-        sx1 = max(0, self.self_cx - SELF_EXCLUDE)
-        sy1 = max(0, self.self_cy - SELF_EXCLUDE)
-        sx2 = min(w, self.self_cx + SELF_EXCLUDE)
-        sy2 = min(h, self.self_cy + SELF_EXCLUDE)
-        full_mask[sy1:sy2, sx1:sx2] = 0
-
         # 保存近身框坐标供可视化
         self.near_box = (nx1, ny1, nx2, ny2)
 
-        near_results = self._detect_from_mask(full_mask, nx1, ny1, nx2, ny2)
+        # 全屏检测一次，然后按中心坐标分近/远
+        all_results = self._detect_from_mask(full_mask, 0, 0, w, h)
+
+        # 按中心是否在绿框内分组
+        near_results = [r for r in all_results
+                        if nx1 <= r["center"][0] <= nx2 and ny1 <= r["center"][1] <= ny2]
+
+        # 每20帧打印一次
+        self._detect_frame_count = getattr(self, '_detect_frame_count', 0) + 1
+        if self._detect_frame_count % 20 == 0:
+            near_dists = [f"{r['dist']:.0f}" for r in near_results]
+            all_dists = [f"{r['dist']:.0f}" for r in all_results]
+            print(f"[DETECT] 绿框:{len(near_results)}个{near_dists} 全屏:{len(all_results)}个{all_dists}")
+
         if near_results:
             near_results.sort(key=lambda r: r["dist"])
             return near_results
 
-        # 阶段2: 全屏检测（近身区以外）
-        all_results = self._detect_from_mask(full_mask, 0, 0, w, h)
         all_results.sort(key=lambda r: r["dist"])
         return all_results
 
