@@ -13,8 +13,8 @@ import pytesseract
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # OCR 裁剪区域（游戏窗口客户区像素坐标）
-OCR_X1, OCR_Y1 = 11, 1008
-OCR_X2, OCR_Y2 = 136, 1032
+OCR_X1, OCR_Y1 = 11, 1013
+OCR_X2, OCR_Y2 = 174, 1032
 
 # 坐标解析正则：支持中文冒号和英文冒号
 _COORD_PATTERN = re.compile(r'(\d+)\s*[：:,.]\s*(\d+)')
@@ -67,7 +67,7 @@ class CoordinateReader:
         try:
             text = pytesseract.image_to_string(
                 binary,
-                config='--psm 7 -c tessedit_char_whitelist=0123456789:.'
+                config='--psm 7'
             ).strip()
         except Exception as e:
             self._fail_count += 1
