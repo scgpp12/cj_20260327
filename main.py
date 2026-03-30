@@ -466,7 +466,7 @@ def main():
                     fps_start_time = time.time()
 
                 draw_exclude_zones(display_frame)
-                draw_wall_overlay(display_frame, patrol.wall_mask)
+                draw_wall_overlay(display_frame, getattr(patrol, 'wall_mask', None))
                 draw_patrol_info(display_frame, patrol.info)
                 from config import GRID_VIZ_ENABLED
                 if GRID_VIZ_ENABLED:
