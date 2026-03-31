@@ -1,5 +1,27 @@
 """
-visualizer.py - 调试可视化模块 (ver04 精简版)
+visualizer.py — 调试画面绘制模块
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【职责】
+  将所有调试信息绘制到 display_frame 上，不影响游戏逻辑。
+
+【主要函数】
+  draw_patrol_info(frame, patrol.info)
+    → 右上角状态文字 + 角色中心方向箭头（青黄色）
+    → 角色中心 → 点击目标紫色箭头（精确点击位置）
+    → 底部路线进度条
+  draw_attack_range(frame)    → 攻击范围圆圈
+  draw_exclude_zones(frame)   → UI排除区域线
+  draw_grid_overlay(frame, grid_data)  → 右上角小地图
+  draw_yolo_all(frame, monsters, self_dets)  → YOLO检测框
+
+【patrol.info 字段说明】
+  state         当前状态 (IDLE/PATROL/STUCK/COMBAT)
+  direction     当前移动方向 (UP/DOWN/LEFT/RIGHT 等8方向)
+  click_pos     本次右键点击的屏幕坐标 (px, py)
+  route_index   当前路线点序号
+  route_total   路线总点数
+  route_target  当前目标点世界坐标 (rx, ry)
+  route_dist    与目标点的曼哈顿距离
 """
 
 import cv2
@@ -155,128 +177,104 @@ def draw_wall_overlay(frame, wall_mask):
     cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
 
 
-def draw_pathfinder_overlay(frame, pathfinder):
-    """
-    绘制 A* 寻路的完整可视化：
-    1. 墙壁红色覆盖
-    2. 路径黄色线
-    3. 拐点红色标记 + 编号
-    """
-    if pathfinder is None:
-        return
-
-    # ---- 1. 墙壁覆盖 ----
-    grid = pathfinder._grid
-    if grid is not None:
-        step = pathfinder.grid_step
-        overlay = frame.copy()
-        grid_h, grid_w = grid.shape
-
-        for gy in range(grid_h):
-            for gx in range(grid_w):
-                if grid[gy, gx] == 0:  # 墙
-                    px = gx * step
-                    py = gy * step
-                    cv2.rectangle(overlay, (px, py), (px + step, py + step),
-                                  (0, 0, 150), cv2.FILLED)
-
-        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
-
-    # ---- 2. 路径线 + 拐点 ----
-    waypoints = pathfinder._last_waypoints
-    if waypoints and len(waypoints) > 0:
-        from config import SELF_CENTER_X, SELF_CENTER_Y
-
-        # 完整路线：角色 → 拐点1 → 拐点2 → ... → 目标
-        pts = [(SELF_CENTER_X, SELF_CENTER_Y)] + list(waypoints)
-
-        # 画路线（黄色粗线）
-        for i in range(len(pts) - 1):
-            cv2.line(frame, pts[i], pts[i + 1], (0, 255, 255), 3)
-
-        # 画拐点（红色圆 + 编号）
-        for idx, (wx, wy) in enumerate(waypoints):
-            # 红色圆圈
-            cv2.circle(frame, (wx, wy), 8, (0, 0, 255), 2)
-            cv2.circle(frame, (wx, wy), 3, (0, 0, 255), -1)
-            # 编号
-            label = f"W{idx + 1}"
-            cv2.putText(frame, label, (wx + 10, wy - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
-            cv2.putText(frame, label, (wx + 10, wy - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-        # 最终目标标记（绿色大圆）
-        last = waypoints[-1]
-        cv2.circle(frame, last, 12, (0, 255, 0), 2)
-        cv2.putText(frame, "GOAL", (last[0] + 15, last[1]),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-
 def draw_patrol_info(frame, patrol_info):
-    """巡逻状态 + 地形雷达"""
-    state = patrol_info.get("state", "IDLE")
-    direction = patrol_info.get("direction", "")
-    click_pos = patrol_info.get("click_pos")
-    terrain = patrol_info.get("terrain")
+    """巡逻状态 + 路线目标标注 + 进度条"""
+    state      = patrol_info.get("state", "IDLE")
+    direction  = patrol_info.get("direction", "")
+    click_pos  = patrol_info.get("click_pos")
+    route_idx  = patrol_info.get("route_index", 0)
+    route_tot  = patrol_info.get("route_total", 0)
+    route_tgt  = patrol_info.get("route_target")   # (rx, ry) 世界坐标
+    route_dist = patrol_info.get("route_dist", 0)
 
     state_colors = {
-        "IDLE": (150, 150, 150),
+        "IDLE":   (150, 150, 150),
         "PATROL": (255, 200, 0),
-        "STUCK": (0, 0, 255),
+        "STUCK":  (0, 0, 255),
         "COMBAT": (0, 255, 0),
     }
     color = state_colors.get(state, (200, 200, 200))
-
     fh, fw = frame.shape[:2]
+
+    # ── 状态文字（右上角）──────────────────────────────
     text = f"STATE: {state}"
     if state == "PATROL":
         text += f" [{direction}]"
-    _put_label(frame, text, fw - 250, 25, color, scale=0.6)
+    _put_label(frame, text, fw - 260, 25, color, scale=0.6)
 
-    try:
-        from patrol_controller import DIRECTIONS, PATROL_DARK_THRESHOLD
-    except ImportError:
-        return
+    # ── 行进方向指示（角色中心发出的粗箭头）──────────────
+    if direction and state in ("PATROL", "STUCK"):
+        try:
+            from patrol_controller import DIRECTIONS
+            ddx, ddy = DIRECTIONS[direction]
+            arrow_len = 60
+            ax = SELF_CENTER_X + int(ddx * arrow_len)
+            ay = SELF_CENTER_Y + int(ddy * arrow_len)
+            move_color = (0, 220, 255)  # 青黄色
+            # 黑色描边（增加可读性）
+            cv2.arrowedLine(frame, (SELF_CENTER_X, SELF_CENTER_Y),
+                            (ax, ay), (0, 0, 0), 6, tipLength=0.35)
+            # 实际颜色
+            cv2.arrowedLine(frame, (SELF_CENTER_X, SELF_CENTER_Y),
+                            (ax, ay), move_color, 3, tipLength=0.35)
+            # 方向文字
+            tx = max(10, min(fw - 80, ax + 6))
+            ty = max(15, min(fh - 10, ay - 6))
+            cv2.putText(frame, direction, (tx, ty),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
+            cv2.putText(frame, direction, (tx, ty),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, move_color, 1)
+        except Exception:
+            pass
 
-    if terrain and state in ("PATROL", "IDLE", "STUCK"):
-        for d_name, score in terrain.items():
-            dx, dy = DIRECTIONS[d_name]
-            line_len = int(25 * min(score / 150.0, 1.0)) + 5
-            ex = SELF_CENTER_X + int(dx * line_len)
-            ey = SELF_CENTER_Y + int(dy * line_len)
-            if score < PATROL_DARK_THRESHOLD:
-                lc = (0, 0, 180)
-            else:
-                g = int(min(score / 150.0, 1.0) * 255)
-                lc = (0, g, 0)
-            cv2.line(frame, (SELF_CENTER_X, SELF_CENTER_Y), (ex, ey), lc, 2)
-
+    # ── 路线目标箭头 + 标注（巡逻/卡住时）──────────────
     if click_pos is not None and state in ("PATROL", "STUCK"):
         cx, cy = click_pos
-        purple = (180, 0, 255)  # 紫色
-        cv2.arrowedLine(frame, (SELF_CENTER_X, SELF_CENTER_Y), (cx, cy), purple, 2, tipLength=0.25)
-        cv2.circle(frame, (cx, cy), 8, purple, -1)  # 实心紫色圆点
+        purple = (200, 50, 255)
 
-    # 已走格子重心：黄色五角星
-    centroid_screen = patrol_info.get("visited_centroid_screen")
-    if centroid_screen is not None:
-        import numpy as np
-        cx, cy = centroid_screen
-        # 限制在屏幕范围内
-        cx = max(20, min(fw - 20, cx))
-        cy = max(20, min(fh - 20, cy))
-        # 画五角星
-        r_out, r_in = 15, 6
-        pts = []
-        for i in range(10):
-            angle = np.radians(-90 + i * 36)
-            r = r_out if i % 2 == 0 else r_in
-            pts.append((int(cx + r * np.cos(angle)), int(cy + r * np.sin(angle))))
-        pts_arr = np.array(pts, dtype=np.int32)
-        cv2.fillPoly(frame, [pts_arr], (0, 255, 255))  # 黄色填充
-        cv2.polylines(frame, [pts_arr], True, (0, 180, 180), 2)  # 边框
-        _put_label(frame, "CENTROID", cx + 18, cy - 5, (0, 255, 255), scale=0.4)
+        # 箭头：角色中心 → 点击目标
+        cv2.arrowedLine(frame, (SELF_CENTER_X, SELF_CENTER_Y),
+                        (cx, cy), purple, 2, tipLength=0.2)
+
+        # 终点大圆圈
+        cv2.circle(frame, (cx, cy), 10, purple, 2)
+        cv2.circle(frame, (cx, cy),  4, purple, -1)
+
+        # 目标世界坐标 + 距离标签
+        if route_tgt is not None:
+            rx, ry = route_tgt
+            lx = max(10, min(fw - 160, cx + 14))
+            ly = max(20, min(fh - 10,  cy - 10))
+            label = f"#{route_idx} ({rx},{ry}) d:{route_dist}"
+            # 黑色描边 + 彩色字
+            cv2.putText(frame, label, (lx, ly),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
+            cv2.putText(frame, label, (lx, ly),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, purple, 1)
+
+    # ── 路线进度条（底部）──────────────────────────────
+    if route_tot > 0 and state in ("PATROL", "STUCK", "IDLE"):
+        bar_x, bar_y = 10, fh - 18
+        bar_w, bar_h = fw - 20, 10
+        pct = route_idx / route_tot
+
+        # 背景
+        cv2.rectangle(frame, (bar_x, bar_y),
+                      (bar_x + bar_w, bar_y + bar_h), (50, 50, 50), -1)
+        # 填充
+        fill_w = int(bar_w * pct)
+        if fill_w > 0:
+            cv2.rectangle(frame, (bar_x, bar_y),
+                          (bar_x + fill_w, bar_y + bar_h), (255, 200, 0), -1)
+        # 边框
+        cv2.rectangle(frame, (bar_x, bar_y),
+                      (bar_x + bar_w, bar_y + bar_h), (150, 150, 150), 1)
+        # 文字
+        prog_text = f"ROUTE {route_idx}/{route_tot}  {pct*100:.0f}%"
+        cv2.putText(frame, prog_text, (bar_x + 4, bar_y - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2)
+        cv2.putText(frame, prog_text, (bar_x + 4, bar_y - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
 
 def draw_fps(frame, fps):

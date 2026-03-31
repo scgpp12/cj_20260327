@@ -1,6 +1,24 @@
 """
-main.py - 主循环 (ver05)
-YOLO 检测（主） + 传统 CV 血条检测（备选） → 攻击最近目标 → 无怪巡逻
+main.py — 主循环（ver05）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【职责】
+  串联所有模块，每帧执行：截图 → 检测 → 追踪 → 攻击/巡逻 → 显示
+
+【检测模式（三选一，在 config.py 切换）】
+  ① RedBallDetector（REDBALL_ENABLED=True）  当前默认，红色圆球
+  ② YoloDetector  （YOLO_ENABLED=True）      深度学习模型
+  ③ HPDetector    （两者都False）            传统CV血条检测
+
+【执行优先级】
+  攻击（有稳定怪物）> 拾取（PICK_ENABLED）> 巡逻（PATROL_ENABLED）
+
+【快捷键】
+  q=退出  p=暂停  a=攻击开关  r=巡逻开关
+  y=YOLO/CV切换  d=HSV调试  s=截图
+  鼠标滚轮=缩放  中键拖拽=平移
+
+【日志】
+  运行时 stdout 同时写入 output/main_log.txt（每次覆盖）
 """
 
 import ctypes
@@ -50,7 +68,7 @@ except Exception as e:
 from visualizer import (
     draw_hp_box, draw_target_box_scan, draw_distance_lines,
     draw_attack_range, draw_exclude_zones, draw_patrol_info,
-    draw_wall_overlay, draw_pathfinder_overlay, draw_yolo_all,
+    draw_wall_overlay, draw_yolo_all,
     draw_grid_overlay, draw_fps, draw_stats, resize_for_display,
 )
 
@@ -96,6 +114,7 @@ try:
 except Exception as e:
     print(f"[WARN] 自动喝药不可用: {e}")
 
+
 # 物品拾取（可选）
 item_picker = None
 try:
@@ -138,8 +157,36 @@ def main():
             for s in self.streams:
                 try: s.flush()
                 except: pass
-    log_file = open("output/main_log.txt", "w", encoding="utf-8")
-    sys.stdout = TeeWriter(sys.__stdout__, log_file)
+    log_file   = open("output/main_log.txt",  "w", encoding="utf-8")
+    debug_file = open("output/debug_log.txt", "w", encoding="utf-8")
+
+    class FilteredTeeWriter(TeeWriter):
+        """[ATK] 行はdebug_logのみ、それ以外はmain_log+コンソール"""
+        def __init__(self, console, main_log, debug_log):
+            self.console   = console
+            self.main_log  = main_log
+            self.debug_log = debug_log
+            self._buf = ""
+
+        def write(self, data):
+            self._buf += data
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                full = line + "\n"
+                if "[ATK]" in full:
+                    try: self.debug_log.write(full); self.debug_log.flush()
+                    except: pass
+                else:
+                    for s in (self.console, self.main_log):
+                        try: s.write(full); s.flush()
+                        except: pass
+
+        def flush(self):
+            for s in (self.console, self.main_log, self.debug_log):
+                try: s.flush()
+                except: pass
+
+    sys.stdout = FilteredTeeWriter(sys.__stdout__, log_file, debug_file)
 
     print("=" * 60)
     print("  Game Detector ver05 (YOLO + CV)")
@@ -387,9 +434,6 @@ def main():
                     # 只有角色实际移动了才清除误检标记
                     if getattr(patrol, '_moved_since_last_check', False):
                         patrol._moved_since_last_check = False
-                    patrol.clear_chase_target()
-
-
                     # ---- 物品拾取（优先级高于巡逻）----
                     pick_active = False
                     if item_picker is not None and item_picker.enabled:
@@ -433,27 +477,12 @@ def main():
 
                     # ---- 巡逻（拾取不活跃时）----
                     if not pick_active:
-                        # 把远处稳定怪物位置告诉巡逻器
-                        out_range = [t for t in stable_targets if _dist_to_self(t) > 300]
-                        monster_hints = []
-                        for t in out_range:
-                            cx, cy = _box_center(t)
-                            monster_hints.append((cx, cy))
-                        patrol.set_monster_hints(monster_hints)
-
                         patrol.on_target_lost()
                         patrol.update(frame, game_hwnd)
                     else:
                         # 拾取中 → 停止巡逻移动
                         patrol.on_target_found()  # 暂停巡逻
 
-
-                # A* 可视化
-                if patrol.pathfinder is not None:
-                    if patrol.state == "PATROL":
-                        draw_pathfinder_overlay(display_frame, patrol.pathfinder)
-                    else:
-                        patrol.pathfinder._last_waypoints = None
 
                 # =========================================
                 # 显示信息

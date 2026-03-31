@@ -11,13 +11,13 @@ class RedBallDetector:
     """红色球体怪物检测器"""
 
     def __init__(self,
-                 red_lower1=(0, 150, 100),
+                 red_lower1=(0, 180, 130),
                  red_upper1=(10, 255, 255),
-                 red_lower2=(170, 150, 100),
+                 red_lower2=(170, 180, 130),
                  red_upper2=(180, 255, 255),
                  min_area=300,
                  max_area=15000,
-                 min_circularity=0.3,
+                 min_circularity=0.5,
                  self_center_x=965,
                  self_center_y=444,
                  self_radius=30):
@@ -93,7 +93,7 @@ class RedBallDetector:
         nx1 = max(0, self.self_cx - NEAR_HALF)
         ny1 = max(0, self.self_cy - NEAR_HALF - NEAR_UP_OFFSET)
         nx2 = min(w, self.self_cx + NEAR_HALF)
-        ny2 = min(h, self.self_cy + NEAR_HALF - NEAR_UP_OFFSET)
+        ny2 = min(h, self.self_cy + NEAR_HALF - NEAR_UP_OFFSET - 5)
 
         # 保存近身框坐标供可视化
         self.near_box = (nx1, ny1, nx2, ny2)
@@ -127,6 +127,8 @@ class RedBallDetector:
                 continue
 
             if area <= self.max_area:
+                x, y, bw, bh = cv2.boundingRect(cnt)
+
                 if not skip_circularity and area < 5000:
                     perimeter = cv2.arcLength(cnt, True)
                     if perimeter < 1:
@@ -134,8 +136,10 @@ class RedBallDetector:
                     circularity = 4 * np.pi * area / (perimeter * perimeter)
                     if circularity < self.min_circularity:
                         continue
-
-                x, y, bw, bh = cv2.boundingRect(cnt)
+                    # 长宽比检测：排除细长条状误检（UI条、血条等）
+                    aspect = bw / bh if bh > 0 else 99
+                    if aspect < 0.4 or aspect > 2.5:
+                        continue
                 cx = x + bw // 2
                 cy = y + bh // 2
                 dist = ((cx - self.self_cx) ** 2 + (cy - self.self_cy) ** 2) ** 0.5

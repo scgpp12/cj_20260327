@@ -1,5 +1,18 @@
 """
-config.py - 集中管理所有可调参数 (ver05 YOLO + 传统CV 双模式)
+config.py — 所有可调参数集中管理（ver05）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【改参数只改这一个文件，不要改其他文件里的硬编码数字】
+
+【最常改的参数】
+  SELF_CENTER_X/Y        角色在画面中的像素坐标（必须校准！）
+  PATROL_MOVE_INTERVAL   巡逻移动频率（越小越快）
+  PATROL_STUCK_TIMEOUT   撞墙判定时间（越大越宽容）
+  REDBALL_ENABLED        怪物检测模式开关
+  POTION_HP_THRESHOLD    喝药血量阈值
+
+【OCR坐标区域】
+  在 coordinate_reader.py 里的 OCR_X1/Y1/X2/Y2
+  换游戏分辨率后必须重新校准
 """
 
 # ============================================================
@@ -69,8 +82,9 @@ POTION_ENABLED = True
 POTION_HP_KEY = "2"             # HP 药快捷键
 POTION_MP_KEY = "3"             # MP 药快捷键
 POTION_HP_THRESHOLD = 0.60      # HP 低于 60% 喝药
-POTION_MP_THRESHOLD = 0.0       # 关闭自动回蓝（设0不触发）
-POTION_COOLDOWN = 1.5           # 喝药冷却（秒）
+POTION_MP_THRESHOLD = 0.20      # MP 低于 20% 喝蓝药
+POTION_COOLDOWN = 1.5           # HP 喝药冷却（秒）
+POTION_MP_COOLDOWN = 10.0       # MP 喝药冷却（秒）
 POTION_ORB_CENTER_X = 92        # 血球圆心 X（相对游戏窗口）
 POTION_ORB_CENTER_Y = 916       # 血球圆心 Y（相对游戏窗口）
 POTION_ORB_RADIUS = 51          # 血球半径

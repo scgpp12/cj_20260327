@@ -13,9 +13,10 @@ import ctypes
 from config import (
     POTION_HP_KEY, POTION_MP_KEY,
     POTION_HP_THRESHOLD, POTION_MP_THRESHOLD,
-    POTION_COOLDOWN,
+    POTION_COOLDOWN, POTION_MP_COOLDOWN,
     POTION_ORB_CENTER_X, POTION_ORB_CENTER_Y, POTION_ORB_RADIUS,
 )
+from voice_alert import get_alert
 
 # PostMessage 按键
 WM_KEYDOWN = 0x0100
@@ -103,7 +104,7 @@ class PotionManager:
                 print(f"[POTION] 喝血药! HP={self.hp_ratio:.0%}")
 
         elif (self.mp_ratio < POTION_MP_THRESHOLD
-                and now - self.last_mp_time >= POTION_COOLDOWN
+                and now - self.last_mp_time >= POTION_MP_COOLDOWN
                 and self._mp_drink_count < self.MAX_INEFFECTIVE_DRINKS):
             if self._mp_drink_count > 0 and self.mp_ratio <= self._mp_before_drink + 0.05:
                 self._mp_drink_count += 1
@@ -120,6 +121,12 @@ class PotionManager:
                 self._mp_drink_count = 0
             else:
                 print(f"[POTION] 喝蓝药! MP={self.mp_ratio:.0%}")
+
+        # HP 语音警告：持续提醒直到 HP 恢复
+        if self.hp_ratio < 0.3:
+            get_alert().say("HP严重不足，请立即处理", cooldown=5.0)
+        elif self.hp_ratio < 0.5:
+            get_alert().say("当前HP已经不足50%，请注意", cooldown=8.0)
 
         return self.hp_ratio, self.mp_ratio, action
 

@@ -1,8 +1,25 @@
 """
-grid_navigator.py - 网格覆盖寻路系统（OCR精确坐标版）
+grid_navigator.py — 网格导航辅助模块
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【职责】
+  为 PatrolController 提供：
+    1. OCR 世界坐标读取（每帧调用 track_frame()）
+    2. 已走格子 + 墙壁格子记录（GridMap，用于小地图可视化）
+    3. on_stuck() 撞墙时标记前方为墙
 
-基于 OCR 读取游戏世界坐标（300×300地图），实现30分钟不走回头路。
-坐标系: 0:0=左上角, X向右, Y向下
+【PatrolController 实际使用的接口】
+  nav.track_frame(frame)   → 每帧更新 world_x / world_y
+  nav.world_x / world_y   → 当前角色世界坐标（读取用）
+  nav.on_stuck(direction)  → 撞墙，标记前方格子为墙
+
+【未被使用但保留的功能】
+  get_direction()          → BFS找未走格子（路线模式下不用）
+  CoveragePlanner          → 蛇形扫描/BFS（路线模式下不用）
+  这些保留供未来"无路线文件"模式参考。
+
+【坐标系】
+  (0,0) = 左上角，X向右，Y向下，地图 300×300
+  坐标 = 游戏世界坐标 = map_centerline.png 像素坐标（直接对应）
 """
 
 import math
@@ -208,11 +225,12 @@ class GridNavigator:
         # 统计
         self.total_steps = 0
 
-    def track_frame(self, frame):
+    def track_frame(self, frame, hint=None):
         """
         每帧调用：OCR 读取坐标，标记已访问。
+        hint: (hx, hy) 当前路线目标点，用于多候选OCR值中选最近的
         """
-        coord = self.coord_reader.read(frame)
+        coord = self.coord_reader.read(frame, hint=hint)
         if coord is not None:
             old_x, old_y = self.world_x, self.world_y
             self.world_x, self.world_y = coord

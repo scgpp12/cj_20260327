@@ -108,6 +108,11 @@ class ActionController:
         self._giveup_time = 0
         self.GIVEUP_COOLDOWN = 3.0
 
+        # 无效目标位置黑名单 [(cx, cy, expire_time), ...]
+        self._blacklist = []
+        self.BLACKLIST_RADIUS = 40    # 黑名单判定半径（px）
+        self.BLACKLIST_DURATION = 15.0  # 黑名单持续时间（秒）
+
         # 巡逻控制器引用
         self._patrol_ref = None
 
@@ -185,12 +190,26 @@ class ActionController:
 
         # ===== 状态机 =====
         if self.state == self.STATE_IDLE:
+            # 清理过期黑名单
+            self._blacklist = [(bx, by, exp) for bx, by, exp in self._blacklist if now < exp]
+
             # 冷却期间只攻击近怪
             if now - self._giveup_time < self.GIVEUP_COOLDOWN:
                 near = [t for t in targets if self._dist_to_self(t) <= 100]
                 if not near:
                     return self._make_info()
                 targets = near
+
+            # 过滤黑名单位置
+            def _in_blacklist(t):
+                cx, cy = _box_center(t)
+                for bx, by, _ in self._blacklist:
+                    if ((cx - bx) ** 2 + (cy - by) ** 2) ** 0.5 < self.BLACKLIST_RADIUS:
+                        return True
+                return False
+            targets = [t for t in targets if not _in_blacklist(t)]
+            if not targets:
+                return self._make_info()
 
             # 释放巡逻右键
             if self._patrol_ref is not None:
@@ -239,6 +258,11 @@ class ActionController:
                 if self._ineffective_rounds >= self.MAX_INEFFECTIVE_ROUNDS:
                     locked_dist = self._dist_to_self(self.locked_target) if self.locked_target else 0
                     print(f"[ATK] {self._ineffective_rounds}轮无效攻击(dist={locked_dist:.0f}) → 放弃目标(冷却{self.GIVEUP_COOLDOWN:.0f}s)")
+                    # 加入黑名单
+                    if self.locked_target is not None:
+                        bcx, bcy = _box_center(self.locked_target)
+                        self._blacklist.append((bcx, bcy, now + self.BLACKLIST_DURATION))
+                        print(f"[ATK] 位置({bcx},{bcy})加入黑名单{self.BLACKLIST_DURATION:.0f}s")
                     self._ineffective_rounds = 0
                     self._giveup_time = now
                     self.locked_target = None

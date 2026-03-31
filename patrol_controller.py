@@ -1,13 +1,38 @@
 """
-patrol_controller.py - 自动巡逻寻怪 (v2 预规划路线模式)
-状态机：IDLE → PATROL → STUCK → COMBAT
-预规划路线优先，A* 局部避障，撞墙跳过路线点
+patrol_controller.py — 自动巡逻控制器（预规划路线模式）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【职责】
+  按 output/map_patrol_route.txt 中预存的路线点顺序巡逻全图。
+  通过 OCR 读取角色世界坐标，精确计算朝路线点的方向并右键点击移动。
+
+【状态机】
+  IDLE   → 无怪等待，超过 PATROL_IDLE_TIMEOUT 秒后进入 PATROL
+  PATROL → 沿路线点顺序移动（主要工作状态）
+  STUCK  → 撞墙处理（盲点3下 + 跳过路线点），处理完立即回 PATROL
+  COMBAT → 外部调用 on_target_found() 触发，巡逻暂停
+
+【移动方式】
+  精确角度右键点击：用世界坐标差(rx-wx, ry-wy)归一化后
+  在角色屏幕中心 ± PATROL_CLICK_DISTANCE 像素处发送 WM_RBUTTONDOWN
+
+【卡死救援（两层）】
+  1. 画面帧差检测（_check_stuck）：1.5s 画面不动 → 贴墙滑行 / 盲点
+  2. 全局看门狗（_watchdog）：20s 总位移 < 10格 → 全局重定位+前推30点
+
+【关键参数】（全部在 config.py 修改）
+  PATROL_MOVE_INTERVAL   每次移动间隔（秒）
+  PATROL_CLICK_DISTANCE  右键点击半径（像素）
+  PATROL_STUCK_TIMEOUT   帧差卡死判定秒数
+  PATROL_STUCK_THRESHOLD 帧差阈值（越大越不敏感）
+
+【路线文件】output/map_patrol_route.txt
+  格式：每行 "x,y"，坐标 = 游戏世界坐标 = map_centerline.png 像素坐标
+  验证坐标是否在路上：gray[y,x] > 60 = 道路，否则 = 墙壁
 """
 
 import time
 import os
 import cv2
-import numpy as np
 import ctypes
 import math
 
@@ -17,7 +42,6 @@ from config import (
     PATROL_CLICK_DISTANCE,
     PATROL_STUCK_TIMEOUT,
     PATROL_STUCK_THRESHOLD,
-    PATROL_DARK_THRESHOLD,
     SELF_CENTER_X,
     SELF_CENTER_Y,
     PATROL_USE_GRID,
@@ -53,9 +77,6 @@ DIRECTIONS = {
     "DOWN_LEFT":  (-1, 1),
     "DOWN_RIGHT": (1, 1),
 }
-DIR_NAMES = list(DIRECTIONS.keys())
-
-
 class PatrolController:
     """
     自动巡逻控制器（预规划路线模式）
@@ -86,11 +107,24 @@ class PatrolController:
         self._held_hwnd = None
         self._held_lparam = 0
 
-        # 追踪目标
-        self._chase_target = None
+        # 路线断点防抖（防止单帧OCR误读触发重定位）
+        self._disconnect_count = 0  # 连续断点帧数，达到3才触发重定位
 
-        # 远处怪物位置提示
-        self._monster_hints = []
+        # 贴墙滑行（绕过墙角）
+        self._corner_slide_count = 0  # 当前目标点已滑行次数，超过4次才放弃转跳点
+        self._slide_steps_left = 0    # 剩余滑行步数（>0时_do_move持续朝垂直方向走）
+        self._slide_perp = (0.0, 0.0) # 当前滑行的垂直方向单位向量
+
+        # OCR 坐标卡住检测
+        self._last_coord = (-1, -1)
+        self._last_coord_time = time.time()
+        self._coord_stuck_timeout = 2.0  # 坐标N秒不变 → 触发贴墙滑行
+
+        # 全局进度看门狗（独立于单次卡死处理，专门应对"困在死角"场景）
+        self._watchdog_coord = None
+        self._watchdog_time = time.time()
+        self._watchdog_timeout = 20.0  # 20秒内位移 < 10格 → 强制全局重定位
+        self._watchdog_min = 10
 
         # ---- 预规划路线 ----
         self.route = []           # [(world_x, world_y), ...]
@@ -108,24 +142,13 @@ class PatrolController:
             except Exception as e:
                 print(f"[PATROL] 网格导航加载失败: {e}")
 
-        # A* 寻路器
-        self.pathfinder = None
-        try:
-            from pathfinder import Pathfinder
-            self.pathfinder = Pathfinder()
-            print("[PATROL] A* 寻路已启用")
-        except Exception as e:
-            print(f"[PATROL] A* 寻路不可用: {e}")
-
         # 巡逻信息（给可视化用）
         self.info = {
             "state": "IDLE",
             "direction": self.current_dir,
             "click_pos": None,
-            "terrain": None,
             "route_index": 0,
             "route_total": len(self.route),
-            "visited_centroid_screen": None,
         }
 
     def _load_route(self):
@@ -147,25 +170,28 @@ class PatrolController:
         except Exception as e:
             print(f"[ROUTE] 加载路线失败: {e}")
 
-    def _find_nearest_route_index(self, wx, wy):
-        """在路线中找到离当前坐标最近的点"""
-        best_idx = 0
+    def _find_nearest_route_index(self, wx, wy, full_search=False):
+        """
+        在路线中找到离当前坐标最近的点。
+        full_search=True  → 搜索全部（仅初始定位时用）
+        full_search=False → 只向前搜索（当前index起，最多+100），永不后退
+        """
+        if full_search or self.route_index == 0:
+            search_start = 0
+            search_end = len(self.route)
+        else:
+            search_start = self.route_index
+            search_end = min(self.route_index + 100, len(self.route))
+
+        best_idx = search_start
         best_dist = 999999
-        for i, (rx, ry) in enumerate(self.route):
+        for i in range(search_start, search_end):
+            rx, ry = self.route[i]
             d = abs(rx - wx) + abs(ry - wy)
             if d < best_dist:
                 best_dist = d
                 best_idx = i
         return best_idx
-
-    def set_chase_target(self, x, y):
-        self._chase_target = (int(x), int(y))
-
-    def clear_chase_target(self):
-        self._chase_target = None
-
-    def set_monster_hints(self, positions):
-        self._monster_hints = positions
 
     def _release_rbutton(self):
         self._rbutton_held = False
@@ -191,14 +217,17 @@ class PatrolController:
         if not self.enabled or game_hwnd is None:
             return
 
-        # 每帧更新 OCR 坐标
+        # 每帧更新 OCR 坐标，传入当前路线目标点作为 hint，用于多候选OCR值中选最近的
         if self.grid_nav is not None:
-            self.grid_nav.track_frame(frame)
+            hint = None
+            if self.route_mode and self.route_index < len(self.route):
+                hint = self.route[self.route_index]
+            self.grid_nav.track_frame(frame, hint=hint)
 
             # 首次获取坐标时，定位到路线最近点
             if self.route_mode and self.route_index == 0 and self.grid_nav.world_x >= 0:
                 self.route_index = self._find_nearest_route_index(
-                    self.grid_nav.world_x, self.grid_nav.world_y)
+                    self.grid_nav.world_x, self.grid_nav.world_y, full_search=True)
                 print(f"[ROUTE] 定位到路线点 #{self.route_index}/{len(self.route)} "
                       f"({self.route[self.route_index][0]},{self.route[self.route_index][1]})")
 
@@ -209,13 +238,81 @@ class PatrolController:
                 self.state = "PATROL"
                 self.info["state"] = "PATROL"
                 self._update_direction()
+                # 进入巡逻时重置看门狗
+                self._watchdog_coord = None
+                self._watchdog_time = now
                 print(f"[PATROL] 开始巡逻，方向: {self.current_dir}")
 
         elif self.state == "PATROL":
             # 检查是否到达当前路线点
             self._check_route_arrival()
 
+            # 更新 OCR 坐标变化时间
+            if self.grid_nav is not None and self.grid_nav.world_x >= 0:
+                cur_coord = (self.grid_nav.world_x, self.grid_nav.world_y)
+                if cur_coord != self._last_coord:
+                    self._last_coord = cur_coord
+                    self._last_coord_time = now
+                    # 坐标变化说明角色在正常移动，重置撞墙计数和滑行计数
+                    self.consecutive_stuck = 0
+                    self._corner_slide_count = 0
+                    self._slide_steps_left = 0
+
+            # 全局进度看门狗：独立计时，不被单次卡死处理重置
+            # 专门应对"困在死角"场景
+            if self.grid_nav is not None and self.grid_nav.world_x >= 0:
+                wx, wy = self.grid_nav.world_x, self.grid_nav.world_y
+                if self._watchdog_coord is None:
+                    self._watchdog_coord = (wx, wy)
+                    self._watchdog_time = now
+                elif now - self._watchdog_time >= self._watchdog_timeout:
+                    ox, oy = self._watchdog_coord
+                    total_moved = abs(wx - ox) + abs(wy - oy)
+                    if total_moved < self._watchdog_min:
+                        print(f"[PATROL] ★ {self._watchdog_timeout:.0f}秒位移仅{total_moved}格(困在死角)，全局重定位")
+                        new_idx = self._find_nearest_route_index(wx, wy, full_search=True)
+                        # 跳过当前附近点，往前推30个
+                        new_idx = min(new_idx + 30, len(self.route) - 1)
+                        self.route_index = new_idx
+                        self.consecutive_stuck = 0
+                        self._update_direction()
+                        print(f"[ROUTE] 全局重定位 → #{self.route_index}{self.route[self.route_index]}")
+                    # 每次到期都更新
+                    self._watchdog_coord = (wx, wy)
+                    self._watchdog_time = now
+
+            # OCR坐标N秒不变 → 触发贴墙滑行（不跳点）
+            coord_stuck = (
+                self.grid_nav is not None
+                and self.grid_nav.world_x >= 0
+                and self._slide_steps_left == 0
+                and now - self._last_coord_time > self._coord_stuck_timeout
+            )
+            if coord_stuck and self.route_mode and self.route_index < len(self.route):
+                wx, wy = self.grid_nav.world_x, self.grid_nav.world_y
+                rx, ry = self.route[self.route_index]
+                if self._corner_slide_count < 4:
+                    self._do_wall_slide(game_hwnd)
+                    self._corner_slide_count += 1
+                    self._last_coord_time = now  # 给滑行留出时间
+                    return
+
             if self._check_stuck(frame):
+                # 距目标较近 → 优先尝试贴墙滑行
+                if (self.route_mode
+                        and self.grid_nav is not None
+                        and self.grid_nav.world_x >= 0
+                        and self.route_index < len(self.route)):
+                    wx, wy = self.grid_nav.world_x, self.grid_nav.world_y
+                    rx, ry = self.route[self.route_index]
+                    world_dist = abs(wx - rx) + abs(wy - ry)
+                    if world_dist <= 25 and self._corner_slide_count < 4:
+                        self._do_wall_slide(game_hwnd)
+                        self._corner_slide_count += 1
+                        return
+
+                # 贴墙滑行用尽 / 距离远 → 盲点处理
+                self._corner_slide_count = 0
                 self.state = "STUCK"
                 self.info["state"] = "STUCK"
                 self.consecutive_stuck += 1
@@ -247,12 +344,112 @@ class PatrolController:
         rx, ry = self.route[self.route_index]
         dist = abs(wx - rx) + abs(wy - ry)
 
-        if dist <= 3:
+        # 路线断点检测：动态阈值，撞墙越多越灵敏
+        # consecutive_stuck=0 → 50, =1 → 30, >=2 → 15
+        if self.consecutive_stuck == 0:
+            _thresh = 50
+        elif self.consecutive_stuck == 1:
+            _thresh = 30
+        else:
+            _thresh = 15
+
+        if dist > _thresh:
+            # 防抖：连续3帧距离异常才触发重定位，防止OCR单帧误读（如37→97）导致级联失败
+            self._disconnect_count += 1
+            if self._disconnect_count >= 3:
+                new_idx = self._find_nearest_route_index(wx, wy)
+                if new_idx != self.route_index:
+                    print(f"[ROUTE] 路线断点(dist={dist})，重定位 #{self.route_index}({rx},{ry})"
+                          f" → #{new_idx}{self.route[new_idx]}")
+                    self.route_index = new_idx
+                    self._update_direction()
+                self._disconnect_count = 0
+            return
+        else:
+            self._disconnect_count = 0  # 距离正常，重置防抖计数
+
+        # 到达判定：Manhattan ≤ 8，或 Chebyshev ≤ 1（x y 各 ±1 范围内即算到达）
+        arrived = dist <= 8 or (abs(wx - rx) <= 1 and abs(wy - ry) <= 1)
+
+        # 越过检测：如果下一个路线点比当前目标更近，说明已经冲过了
+        if not arrived and self.route_index + 1 < len(self.route):
+            nx, ny = self.route[self.route_index + 1]
+            if abs(wx - nx) + abs(wy - ny) < dist:
+                arrived = True
+
+        if arrived:
             self.route_index += 1
+            self._corner_slide_count = 0
+            self._slide_steps_left = 0
             self._update_direction()
             if self.route_index % 50 == 0:
                 progress = self.route_index / len(self.route) * 100
                 print(f"[ROUTE] 进度: {self.route_index}/{len(self.route)} ({progress:.0f}%)")
+
+    def _do_wall_slide(self, game_hwnd):
+        """贴墙滑行：设定垂直方向滑行步数，由 _do_move 持续执行。
+        步数 = max(至少2秒对应步数, world_dist/4)，奇偶次交替两侧方向。
+        """
+        if self.grid_nav is None or self.grid_nav.world_x < 0:
+            return
+        if self.route_index >= len(self.route):
+            return
+
+        wx, wy = self.grid_nav.world_x, self.grid_nav.world_y
+        rx, ry = self.route[self.route_index]
+        ddx = rx - wx
+        ddy = ry - wy
+        world_dist = abs(ddx) + abs(ddy)
+        euclid = math.sqrt(ddx * ddx + ddy * ddy)
+        if euclid == 0:
+            return
+
+        # 精确方向向量（目标方向）
+        ndx = ddx / euclid
+        ndy = ddy / euclid
+
+        # 原移动方向（current_dir 8方向，与精确目标方向略有偏差）
+        odx, ody = DIRECTIONS.get(self.current_dir, (0, 0))
+        odist = math.sqrt(odx * odx + ody * ody)
+        if odist > 0:
+            v_orig_x = odx / odist
+            v_orig_y = ody / odist
+        else:
+            v_orig_x, v_orig_y = ndx, ndy
+
+        # 叉积判断目标方向相对原方向的偏转侧
+        # cross < 0 → 目标在原方向的逆时针侧（屏幕坐标 y 向下）
+        # cross > 0 → 目标在原方向的顺时针侧
+        cross = v_orig_x * ndy - v_orig_y * ndx
+
+        # 主方向：选让"原方向→滑行方向"扇形包含目标方向的那侧垂直方向
+        if cross <= 0:
+            # 目标偏逆时针 → 滑行选顺时针垂直方向
+            primary_perp   = (ndy, -ndx)   # 顺时针 90°
+            secondary_perp = (-ndy, ndx)   # 逆时针 90°（备用）
+        else:
+            # 目标偏顺时针 → 滑行选逆时针垂直方向
+            primary_perp   = (-ndy, ndx)   # 逆时针 90°
+            secondary_perp = (ndy, -ndx)   # 顺时针 90°（备用）
+
+        if self._corner_slide_count % 2 == 0:
+            perp_x, perp_y = primary_perp
+            side = "主方向"
+        else:
+            perp_x, perp_y = secondary_perp
+            side = "备用方向"
+
+        # 滑行步数：至少2秒，或 world_dist/4 步，取较大值
+        min_steps = math.ceil(2.0 / PATROL_MOVE_INTERVAL)   # 至少 ceil(2/0.6)=4 步
+        dist_steps = max(1, round(world_dist / 4))
+        slide_steps = max(min_steps, dist_steps)
+
+        self._slide_steps_left = slide_steps
+        self._slide_perp = (perp_x, perp_y)
+        print(f"[PATROL] 贴墙滑行启动({self._corner_slide_count + 1}/4) [{side}]"
+              f" cross={cross:.2f} dist={world_dist}"
+              f" → {slide_steps}步({slide_steps * PATROL_MOVE_INTERVAL:.1f}s)"
+              f" 目标#{self.route_index}({rx},{ry})")
 
     def _update_direction(self):
         """根据路线更新当前方向"""
@@ -262,9 +459,14 @@ class PatrolController:
                 self.current_dir = direction
                 self.info["direction"] = self.current_dir
                 self.info["route_index"] = self.route_index
+                # 目标点信息（供可视化）
+                if self.route_index < len(self.route):
+                    rx, ry = self.route[self.route_index]
+                    wx, wy = self.grid_nav.world_x, self.grid_nav.world_y
+                    self.info["route_target"] = (rx, ry)
+                    self.info["route_dist"] = abs(rx - wx) + abs(ry - wy)
                 return
 
-        # fallback: 用地形扫描
         self.info["direction"] = self.current_dir
 
     def _get_route_direction(self):
@@ -292,34 +494,64 @@ class PatrolController:
         return None
 
     def _do_move(self, frame, game_hwnd):
-        """发送移动指令 — 路线模式 + A* 局部避障"""
+        """发送移动指令 — 精确角度朝路线点右键点击"""
 
-        # 更新方向
+        # 贴墙滑行中：优先朝垂直方向走，走完再恢复原方向
+        if self._slide_steps_left > 0:
+            perp_x, perp_y = self._slide_perp
+            click_x = int(SELF_CX + perp_x * PATROL_CLICK_DISTANCE)
+            click_y = int(SELF_CY + perp_y * PATROL_CLICK_DISTANCE)
+            h, w = frame.shape[:2]
+            click_x = max(10, min(w - 10, click_x))
+            click_y = max(10, min(h - 10, click_y))
+            self._slide_steps_left -= 1
+            try:
+                lparam = _make_lparam(click_x, click_y)
+                PostMessage(game_hwnd, WM_RBUTTONDOWN, MK_RBUTTON, lparam)
+                PostMessage(game_hwnd, WM_RBUTTONUP, 0, lparam)
+                self._held_hwnd = game_hwnd
+            except Exception as e:
+                print(f"[PATROL] 滑行移动失败: {e}")
+                return
+            self.move_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            self.move_frame_time = time.time()
+            self.last_move_time = time.time()
+            self.info["click_pos"] = (click_x, click_y)
+            remaining_s = self._slide_steps_left * PATROL_MOVE_INTERVAL
+            print(f"[PATROL] 滑行中 剩余{self._slide_steps_left}步({remaining_s:.1f}s)"
+                  f" → click({click_x},{click_y})")
+            return
+
+        # 更新方向（供显示用）
         self._update_direction()
 
-        # 确定目标点
-        if self._chase_target is not None:
-            click_x, click_y = self._chase_target
-            mode = "CHASE"
+        # 精确角度点击：用世界坐标差值算真实方向向量
+        mode = "ROUTE"
+        if (self.route_mode
+                and self.grid_nav is not None
+                and self.grid_nav.world_x >= 0
+                and self.route_index < len(self.route)):
+            wx, wy = self.grid_nav.world_x, self.grid_nav.world_y
+            rx, ry = self.route[self.route_index]
+            ddx = rx - wx
+            ddy = ry - wy
+            dist = math.sqrt(ddx * ddx + ddy * ddy)
+            if dist > 0:
+                ndx = ddx / dist
+                ndy = ddy / dist
+                click_x = int(SELF_CX + ndx * PATROL_CLICK_DISTANCE)
+                click_y = int(SELF_CY + ndy * PATROL_CLICK_DISTANCE)
+            else:
+                # 已在目标点上，用当前方向
+                dx, dy = DIRECTIONS[self.current_dir]
+                click_x = SELF_CX + int(dx * PATROL_CLICK_DISTANCE)
+                click_y = SELF_CY + int(dy * PATROL_CLICK_DISTANCE)
         else:
+            # fallback：8方向
+            mode = "PATROL"
             dx, dy = DIRECTIONS[self.current_dir]
             click_x = SELF_CX + int(dx * PATROL_CLICK_DISTANCE)
             click_y = SELF_CY + int(dy * PATROL_CLICK_DISTANCE)
-            mode = "ROUTE" if self.route_mode else "PATROL"
-
-        # A* 局部避障
-        if self.pathfinder is not None:
-            waypoints = self.pathfinder.find_path(frame, click_x, click_y)
-            if waypoints:
-                # 过滤太近的拐点
-                waypoints = [(wx, wy) for wx, wy in waypoints
-                             if ((wx - SELF_CX) ** 2 + (wy - SELF_CY) ** 2) ** 0.5 >= 200]
-                if waypoints:
-                    click_x, click_y = waypoints[0]
-                    mode = f"A*{mode}"
-            else:
-                # A* 失败 → 直线走
-                pass
 
         # 限制在画面内
         h, w = frame.shape[:2]
@@ -365,7 +597,7 @@ class PatrolController:
         return False
 
     def _handle_stuck(self, frame):
-        """撞墙处理：盲点3下 + 跳过路线点"""
+        """撞墙处理：盲点3下"""
         self._release_rbutton()
         stuck_dir = self.current_dir
 
@@ -387,83 +619,10 @@ class PatrolController:
             except Exception:
                 pass
 
-        # 清除 A* 缓存
-        if self.pathfinder is not None:
-            self.pathfinder._last_waypoints = None
-
         # 通知网格导航
         if self.grid_nav is not None:
             self.grid_nav.on_stuck(stuck_dir)
 
-        # 路线模式：跳过被墙挡的路线点
-        if self.route_mode and self.grid_nav and self.grid_nav.world_x >= 0:
-            wx, wy = self.grid_nav.world_x, self.grid_nav.world_y
-            skip_count = 0
-            for i in range(self.route_index, min(self.route_index + 15, len(self.route))):
-                rx, ry = self.route[i]
-                # 如果路线点在撞墙方向上 → 跳过
-                rdx = rx - wx
-                rdy = ry - wy
-                if rdx == 0 and rdy == 0:
-                    skip_count += 1
-                    continue
-                ndx = 1 if rdx > 0 else (-1 if rdx < 0 else 0)
-                ndy = 1 if rdy > 0 else (-1 if rdy < 0 else 0)
-                sdx, sdy = DIRECTIONS.get(stuck_dir, (0, 0))
-                if ndx == sdx and ndy == sdy:
-                    skip_count += 1
-                else:
-                    break  # 不在撞墙方向了，停止跳过
-            if skip_count > 0:
-                self.route_index += skip_count
-                print(f"[ROUTE] 撞墙跳过 {skip_count} 个点 → #{self.route_index}")
-        else:
-            # 无路线模式：用地形选方向
-            terrain = self._scan_terrain(frame)
-            best_dir = max(terrain, key=terrain.get)
-            self.current_dir = best_dir
-
-        if self.consecutive_stuck >= 5:
-            self.consecutive_stuck = 0
-            # 跳过更多路线点
-            if self.route_mode:
-                self.route_index = min(self.route_index + 20, len(self.route) - 1)
-                print(f"[ROUTE] 连续撞墙5次，大跳到 #{self.route_index}")
-
         self._update_direction()
         self.move_frame = None
 
-    def _scan_terrain(self, frame):
-        """扫描 8 个方向的地面亮度"""
-        frame_id = id(frame)
-        if hasattr(self, '_terrain_cache_id') and self._terrain_cache_id == frame_id:
-            return self._terrain_cache_result
-        h, w = frame.shape[:2]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-        scores = {}
-        sample_distances = [80, 150, 220]
-        sample_weights = [3.0, 2.0, 1.0]
-        sample_size = 30
-
-        for d_name in DIR_NAMES:
-            dx, dy = DIRECTIONS[d_name]
-            total_score = 0.0
-            total_weight = 0.0
-            for dist, weight in zip(sample_distances, sample_weights):
-                cx = SELF_CX + int(dx * dist)
-                cy = SELF_CY + int(dy * dist)
-                x1 = max(0, cx - sample_size)
-                y1 = max(0, cy - sample_size)
-                x2 = min(w, cx + sample_size)
-                y2 = min(h, cy + sample_size)
-                if x2 - x1 < 5 or y2 - y1 < 5:
-                    total_weight += weight
-                    continue
-                region = gray[y1:y2, x1:x2]
-                total_score += float(region.mean()) * weight
-                total_weight += weight
-            scores[d_name] = total_score / total_weight if total_weight > 0 else 0
-
-        self._terrain_cache_id = frame_id
-        self._terrain_cache_result = scores
-        return scores
